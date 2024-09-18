@@ -38,11 +38,11 @@ jobs:
         context: .
         file: ./Dockerfile.cuda
         push: true
-        tags: ghcr.io/nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cuda
+        tags: ghcr.io/nyralei/whisperx-api-server:${{ steps.get_version.outputs.version }}-cuda
     - name: Build and push CPU image
       uses: docker/build-push-action@v6
       with:
         context: .
         file: ./Dockerfile.cpu
         push: true
-        tags: ghcr.io/nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cpu
+        tags: ghcr.io/nyralei/whisperx-api-server:${{ steps.get_version.outputs.version }}-cpu

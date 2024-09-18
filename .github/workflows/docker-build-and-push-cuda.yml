@@ -38,5 +38,6 @@ jobs:
         context: .
         file: ./Dockerfile.cuda
         cache-from: type=gha
+        cache-to: type=gha,mode=max
         push: true
         tags: ghcr.io/nyralei/whisperx-api-server:${{ steps.get_version.outputs.version }}-cuda

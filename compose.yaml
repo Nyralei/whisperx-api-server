@@ -1,0 +1,37 @@
+services:
+  whisperx-api-server-cuda:
+    image: whisperx-api-server-cuda
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8000/healthcheck || exit 1"]
+    command: uvicorn whisperx_api_server.main:app --host 0.0.0.0 --port 8000 --workers 1 --loop asyncio --log-level debug --log-config whisperx_api_server/logging_config.json
+    ports:
+      - 8000:8000
+    volumes:
+      - hugging_face_cache:/root/.cache/huggingface
+      - torch_cache:/root/.cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  whisperx-api-server-cpu:
+    image: whisperx-api-server-cpu
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8000/healthcheck || exit 1"]
+    command: uvicorn whisperx_api_server.main:app --host 0.0.0.0 --port 8000 --loop asyncio --log-level debug --log-config whisperx_api_server/logging_config.json
+    ports:
+      - 8000:8000
+    volumes:
+      - hugging_face_cache:/root/.cache/huggingface
+      - torch_cache:/root/.cache/torch
+volumes:
+  hugging_face_cache:
+  torch_cache:

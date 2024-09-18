@@ -1,0 +1,28 @@
+FROM python:3.10-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    python3-pip \
+    python3-venv \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+WORKDIR /workspace
+
+RUN python3 -m venv venv
+
+ENV PATH="/workspace/venv/bin:$PATH"
+
+RUN pip install --upgrade pip
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY src/whisperx_api_server ./whisperx_api_server
+
+CMD ["sleep", "infinity"]

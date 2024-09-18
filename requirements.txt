@@ -1,0 +1,10 @@
+fastapi==0.114.1
+uvicorn==0.30.6
+pydantic==2.9.1
+aiohttp==3.10.5
+whisperx @ git+https://github.com/Nyralei/whisperX.git@25c3fc61f795bf3fd40663098633fdba893eab0e
+ctranslate2==4.4.0
+numpy==1.26.4
+tqdm==4.66.5
+pydantic-settings==2.5.2
+python-multipart==0.0.9

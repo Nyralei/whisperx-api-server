@@ -1,6 +1,5 @@
 import os
 import shutil
-import tempfile
 import torch
 from whisperx import asr as whisperx_asr
 from whisperx import transcribe as whisperx_transcribe

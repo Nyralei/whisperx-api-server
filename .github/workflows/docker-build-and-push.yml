@@ -34,9 +34,9 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
     - name: 'Build CUDA Image'
       run: |
-        docker build -t ghcr.io/Nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cuda -f ./Dockerfile.cuda .
-        docker push ghcr.io/Nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cuda
+        docker build -t ghcr.io/nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cuda -f ./Dockerfile.cuda .
+        docker push ghcr.io/nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cuda
     - name: 'Build CPU Image'
       run: |
-        docker build -t ghcr.io/Nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cpu -f ./Dockerfile.cpu .
-        docker push ghcr.io/Nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cpu
+        docker build -t ghcr.io/nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cpu -f ./Dockerfile.cpu .
+        docker push ghcr.io/nyralei/whisperx-api-server:{{ steps.get_version.outputs.version }}-cpu

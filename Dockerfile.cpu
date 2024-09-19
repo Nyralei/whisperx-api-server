@@ -15,11 +15,11 @@ RUN python3 -m venv venv
 
 ENV PATH="/workspace/venv/bin:$PATH"
 
-COPY requirements-cuda.txt .
+COPY requirements-cpu.txt .
 COPY requirements.txt .
 
 RUN pip install --upgrade pip && \
-    pip install -r requirements-cuda.txt \
+    pip install -r requirements-cpu.txt \
     && pip install -r requirements.txt
 
 COPY src/whisperx_api_server ./whisperx_api_server

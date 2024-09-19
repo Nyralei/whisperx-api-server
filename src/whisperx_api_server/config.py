@@ -144,16 +144,23 @@ class WhisperConfig(BaseModel):
     You can find other supported models at https://huggingface.co/models?p=2&sort=trending&search=ctranslate2 and https://huggingface.co/models?sort=trending&search=ct2
     """
     inference_device: Device = Field(default=Device.AUTO)
-    device_index: int | list[int] = 0
+    device_index: int | list[int] = Field(default=0)
     compute_type: Quantization = Field(default=Quantization.DEFAULT)
-    cpu_threads: int = 0
-    num_workers: int = 1
+    cpu_threads: int = Field(default=0)
+    num_workers: int = Field(default=1)
 
 class Config(BaseSettings):
+    """
+    Configuration for the application. Values can be set via environment variables.
+
+    Pydantic will automatically handle mapping uppercased environment variables to the corresponding fields.
+    To populate nested, the environment should be prefixed with the nested field name and an underscore. For example,
+    the environment variable `LOG_LEVEL` will be mapped to `log_level`, `WHISPER__MODEL`(note the double underscore) to `whisper.model`, to set quantization to int8, use `WHISPER__COMPUTE_TYPE=int8`, etc.
+    """
 
     model_config = SettingsConfigDict(env_nested_delimiter="__")
 
-    log_level: str = "debug"
+    log_level: str = "DEBUG"
 
     host: str = Field(alias="UVICORN_HOST", default="0.0.0.0")
     port: int = Field(alias="UVICORN_PORT", default=8000)

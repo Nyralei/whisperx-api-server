@@ -5,6 +5,7 @@ from whisperx import asr as whisperx_asr
 from whisperx import transcribe as whisperx_transcribe
 from whisperx import audio as whisperx_audio
 from whisperx import alignment as whisperx_alignment
+from whisperx import diarize as whisperx_diarize
 from typing import Union, List, Optional
 from fastapi import UploadFile
 import logging
@@ -12,11 +13,13 @@ import time
 
 from whisperx_api_server.config import config
 from whisperx_api_server.formatters import format_transcription
+from whisperx_api_server.models import (
+    load_align_model_cached,
+    load_diarize_model_cached,
+)
 
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)  # Set the logging level
-
-model_cache = {}
+logger = logging.getLogger("transcriber_logger")
+logger.setLevel(config.log_level)
 
 class CustomWhisperModel(whisperx_asr.WhisperModel):
     def __init__(
@@ -51,28 +54,6 @@ class CustomWhisperModel(whisperx_asr.WhisperModel):
         self.download_root = download_root
         self.local_files_only = local_files_only
 
-def load_align_model_cached(language_code, device, model_name=None, model_dir=None):
-    # Check if the model for this language is already cached
-    if language_code in model_cache:
-        logger.info(f"Reusing cached model for language: {language_code}")
-        return model_cache[language_code]["model"], model_cache[language_code]["metadata"]
-
-    # If not cached, call the original load_align_model function
-    align_model, align_metadata = whisperx_alignment.load_align_model(
-        language_code=language_code,
-        device=device,
-        model_name=model_name,
-        model_dir=model_dir
-    )
-
-    # Cache the loaded model and metadata
-    model_cache[language_code] = {
-        "model": align_model,
-        "metadata": align_metadata
-    }
-
-    return align_model, align_metadata
-
 def check_device():
     try:
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -102,6 +83,7 @@ async def transcribe(
     response_format,
     whispermodel,
     highlight_words,
+    diarize
 ):
     start_time = time.time()  # Start timing
     file_path = f"/tmp/{audio_file.filename}"
@@ -149,6 +131,21 @@ async def transcribe(
             return_char_alignments=False
         )
         logger.info(f"Alignment took {time.time() - alignment_start:.2f} seconds")
+
+        if diarize:
+            diarize_start = time.time()
+
+            logger.info("Loading diarization model")
+
+            diarize_model = load_diarize_model_cached(model_name="tensorlake/speaker-diarization-3.1", device=whispermodel.device)
+
+            logger.info("Diarization model loaded. Starting diarization...")
+
+            diarize_segments = diarize_model(audio)
+
+            result["segments"] = whisperx_diarize.assign_word_speakers(diarize_segments, result["segments"])
+
+            logger.info(f"Diarization took {time.time() - diarize_start:.2f} seconds")
 
         result["text"] = '\n'.join([segment["text"].strip() for segment in result["segments"]["segments"] if segment["text"].strip()])
 

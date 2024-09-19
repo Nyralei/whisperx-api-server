@@ -13,17 +13,21 @@ from whisperx_api_server.config import (
     ResponseFormat,
     config,
 )
-
-# Global cache and locks
-model_instances = {}
-model_locks = defaultdict(Lock)
+from whisperx_api_server.models import (
+    load_model_instance,
+    load_align_model_cached,
+    load_diarize_model_cached,
+    model_instances,
+    align_model_instances,
+    diarize_model_instances,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG,
 )
 logger = logging.getLogger("api_logger")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(config.log_level)
 
 def handle_default_openai_model(model_name: str) -> str:
     """Adjust the model name if it defaults to 'whisper-1'."""
@@ -38,25 +42,6 @@ ModelName = Annotated[str, AfterValidator(handle_default_openai_model)]
 # FastAPI app instance
 app = FastAPI()
 
-# Async function to get the model instance
-async def load_model_instance(model_name: str):
-    global model_locks
-    global model_instances
-
-    # Check if the model is already in memory cache (without locking)
-    if model_name in model_instances:
-        logger.info(f"Reusing cached model instance for {model_name}")
-        return model_instances[model_name]
-
-    # Use lock to avoid reloading the model concurrently
-    async with model_locks[model_name]:
-        # Double-check if model was loaded during waiting for the lock
-        if model_name not in model_instances:
-            logger.info(f"Initializing model: {model_name}")
-            model_instances[model_name] = await transcriber.initialize_model(model_name)
-        return model_instances[model_name]
-    
-    
 """
 OpenAI-like endpoint to transcribe audio files using the Whisper ASR model.
 
@@ -72,6 +57,7 @@ Args:
     hotwords (str): The hotwords to use for the transcription.
     suppress_numerals (bool): Whether to suppress numerals in the transcription. Defaults to True.
     highlight_words (bool): Whether to highlight words in the transcription (Applies only to VTT and SRT). Defaults to False.
+    diarize (bool): Whether to diarize the transcription. Defaults to False.
 
 Returns:
     Transcription: The transcription of the audio file.
@@ -92,6 +78,7 @@ async def transcribe_audio(
     hotwords: Annotated[str, Form()] = None,
     suppress_numerals: Annotated[bool, Form()] = True,
     highlight_words: Annotated[bool, Form()] = False,
+    diarize: Annotated[bool, Form()] = False,
 ):
     start_time = time.time()  # Start the timer
     logger.debug(f"Received request to transcribe {file.filename} with parameters: \
@@ -104,7 +91,8 @@ async def transcribe_audio(
         stream: {stream}, \
         hotwords: {hotwords}, \
         suppress_numerals: {suppress_numerals} \
-    ")
+        highlight_words: {highlight_words} \
+        diarize: {diarize}")
 
     # Determine if word timestamps are required
     word_timestamps = "word" in timestamp_granularities
@@ -132,7 +120,8 @@ async def transcribe_audio(
             language=language,
             response_format=response_format,
             whispermodel=model_instance,
-            highlight_words=highlight_words
+            highlight_words=highlight_words,
+            diarize=diarize
         )
     except Exception as e:
         logger.exception(f"Transcription failed: {e}")
@@ -168,6 +157,50 @@ def unload_model(model: Annotated[ModelName, Form()]):
 async def load_model(model: Annotated[ModelName, Form()]):
     try:
         await load_model_instance(model)
+        return {"status": "success", "model": model}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/align_models/list")
+def list_align_models():
+    global align_model_instances
+    return {
+        "models": list(align_model_instances.keys())
+    }
+
+@app.post("/align_models/unload")
+def unload_align_model(language: Annotated[Language, Form()]):
+    if language not in align_model_instances:
+        return {"status": "error", "message": f"Model with language {language} not found"}
+    del align_model_instances[language]
+    return {"status": "success"}
+
+@app.post("/align_models/load")
+async def load_align_model(language: Annotated[Language, Form()]):
+    try:
+        await load_align_model_cached(language)
+        return {"status": "success", "model": language}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    
+@app.get("/diarize_models/list")
+def list_diarize_models():
+    global diarize_model_instances
+    return {
+        "models": list(diarize_model_instances.keys())
+    }
+
+@app.post("/diarize_models/unload")
+def unload_diarize_model(model: Annotated[ModelName, Form()]):
+    if model not in diarize_model_instances:
+        return {"status": "error", "message": f"Model {model} not found"}
+    del diarize_model_instances[model]
+    return {"status": "success"}
+
+@app.post("/diarize_models/load")
+async def load_diarize_model(model: Annotated[ModelName, Form()]):
+    try:
+        await load_diarize_model_cached(model)
         return {"status": "success", "model": model}
     except Exception as e:
         return {"status": "error", "message": str(e)}

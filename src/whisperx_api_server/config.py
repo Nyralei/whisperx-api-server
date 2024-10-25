@@ -132,6 +132,10 @@ class Device(str, Enum):
     CUDA = "cuda"
     AUTO = "auto"
 
+class VadMethod(str, Enum):
+    SILERO = "silero"
+    PYANNOTE = "pyannote"
+
 class WhisperConfig(BaseModel):
     """See https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/transcribe.py#L599."""
 
@@ -148,6 +152,10 @@ class WhisperConfig(BaseModel):
     compute_type: Quantization = Field(default=Quantization.DEFAULT)
     cpu_threads: int = Field(default=0)
     num_workers: int = Field(default=1)
+    vad_method: VadMethod = Field(default=VadMethod.PYANNOTE)
+    vad_model: str = Field(default=None)
+    vad_options: dict = Field(default=None)
+
 
 class Config(BaseSettings):
     """

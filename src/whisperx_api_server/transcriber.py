@@ -101,6 +101,9 @@ async def transcribe(
             compute_type=whispermodel.compute_type,
             language=language,
             asr_options=asr_options,
+            vad_model=config.whisper.vad_model,
+            vad_method=config.whisper.vad_method,
+            vad_options=config.whisper.vad_options,
             model=whispermodel,
         )
         logger.info(f"Loading model took {time.time() - model_loading_start:.2f} seconds")

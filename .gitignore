@@ -5,6 +5,9 @@ __pycache__/
 
 # Custom
 models
+compose-dev.yaml
+scripts
+whisperx
 
 # C extensions
 *.so

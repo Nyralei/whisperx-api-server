@@ -6,8 +6,9 @@ __pycache__/
 # Custom
 models
 compose-dev.yaml
+Dockerfile.cuda-dev
 scripts
-whisperx
+whisperx/
 
 # C extensions
 *.so

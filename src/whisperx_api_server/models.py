@@ -38,23 +38,50 @@ async def load_model_instance(model_name: str):
         return model_instances[model_name]
     
 def load_align_model_cached(language_code, device, model_name=None, model_dir=None):
+    """
+    Loads and caches alignment models based on language codes to optimize repeated use.
+
+    Parameters:
+    - language_code (str): The code for the language (e.g., "en", "fr").
+    - device (str): The device to load the model on (e.g., "cpu", "cuda").
+    - model_name (str, optional): Explicit model name to use. Defaults to None.
+    - model_dir (str, optional): Directory for loading/saving models. Defaults to None.
+
+    Returns:
+    - tuple: The loaded model and metadata.
+    """
     global align_model_instances
 
-    # Check if the model for this language is already cached
-    if language_code in align_model_instances:
+    if "multilingual" in config.alignment.models:
+        model_name = config.alignment.models["multilingual"]
+        logger.info(f"Loading configured {model_name} for multilingual")
+    elif language_code in config.alignment.models:
+        model_name = config.alignment.models[language_code]
+        logger.info(f"Loading configured {model_name} for {language_code}")
+
+        # Reuse cached model if available
+    if "multilingual" in align_model_instances:
+        logger.info("Reusing cached multilingual model")
+        return align_model_instances["multilingual"]["model"], align_model_instances["multilingual"]["metadata"]
+    elif language_code in align_model_instances:
         logger.info(f"Reusing cached model for language: {language_code}")
         return align_model_instances[language_code]["model"], align_model_instances[language_code]["metadata"]
 
-    # If not cached, call the original load_align_model function
-    align_model, align_metadata = whisperx_alignment.load_align_model(
-        language_code=language_code,
-        device=device,
-        model_name=model_name,
-        model_dir=model_dir
-    )
+    # Load model and metadata
+    try:
+        align_model, align_metadata = whisperx_alignment.load_align_model(
+            language_code=language_code,
+            device=device,
+            model_name=model_name,
+            model_dir=model_dir
+        )
+    except Exception as e:
+        logger.error(f"Failed to load alignment model for language {language_code}: {e}")
+        raise
 
     # Cache the loaded model and metadata
-    align_model_instances[language_code] = {
+    cache_key = "multilingual" if model_name == config.alignment.models.get("multilingual") else language_code
+    align_model_instances[cache_key] = {
         "model": align_model,
         "metadata": align_metadata
     }

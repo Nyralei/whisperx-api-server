@@ -2,3 +2,7 @@ __pycache__
 .git
 .gitignore
 README.md
+models
+whisperx/hf-home
+whisperx/torch-home
+whisperx/test-files

@@ -80,10 +80,15 @@ def load_align_model_cached(language_code, device, model_name=None, model_dir=No
         raise
 
     # Cache the loaded model and metadata
-    cache_key = "multilingual" if model_name == config.alignment.models.get("multilingual") else language_code
+    cache_key = (
+        "multilingual"
+        if config.alignment.models.get("multilingual") is not None 
+        and model_name == config.alignment.models.get("multilingual")
+        else language_code
+    )
     align_model_instances[cache_key] = {
         "model": align_model,
-        "metadata": align_metadata
+        "metadata": align_metadata,
     }
 
     return align_model, align_metadata

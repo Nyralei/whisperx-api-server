@@ -158,7 +158,7 @@ class WhisperConfig(BaseModel):
 
 
 class AlignConfig(BaseModel):
-    models: dict = Field(default=None)
+    models: dict = Field(default_factory=dict)
 
 class Config(BaseSettings):
     """

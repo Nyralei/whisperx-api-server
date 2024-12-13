@@ -157,6 +157,9 @@ class WhisperConfig(BaseModel):
     vad_options: dict = Field(default=None)
 
 
+class AlignConfig(BaseModel):
+    models: dict = Field(default=None)
+
 class Config(BaseSettings):
     """
     Configuration for the application. Values can be set via environment variables.
@@ -180,5 +183,7 @@ class Config(BaseSettings):
     batch_size: int = 12
 
     whisper: WhisperConfig = WhisperConfig()
+
+    alignment: AlignConfig = AlignConfig()
 
 config = Config()

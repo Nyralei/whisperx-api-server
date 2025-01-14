@@ -10,6 +10,7 @@ from typing import Union, List, Optional
 from fastapi import UploadFile
 import logging
 import time
+import tempfile
 
 from whisperx_api_server.config import config
 from whisperx_api_server.formatters import format_transcription
@@ -87,9 +88,9 @@ async def transcribe(
     request_id
 ):
     start_time = time.time()  # Start timing
-    file_path = f"/tmp/{audio_file.filename}"
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(audio_file.file, buffer)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{audio_file.filename}") as temp_file:
+        temp_file.write(audio_file.file.read())
+        file_path = temp_file.name
 
     logger.info(f"Request ID: {request_id} - Saving uploaded file took {time.time() - start_time:.2f} seconds")
 

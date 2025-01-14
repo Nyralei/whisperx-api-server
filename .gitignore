@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# IDEs
+.vscode/
+.idea/
+
 # Custom
 models
 compose-dev.yaml

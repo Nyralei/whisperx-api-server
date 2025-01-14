@@ -2,6 +2,6 @@ fastapi==0.115.6
 uvicorn==0.32.1
 pydantic==2.10.3
 aiohttp==3.11.10
-whisperx @ git+https://github.com/Nyralei/whisperX.git@b3456748d06964eff81a2731660f9d4cce17a2ec
+whisperx @ git+https://github.com/Nyralei/whisperX.git@fc40c33d8fc275ffa14861f0532fdae13b5319db
 pydantic-settings==2.6.1
 python-multipart==0.0.19

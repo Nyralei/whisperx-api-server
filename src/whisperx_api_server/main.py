@@ -1,8 +1,11 @@
 import logging
+import uuid
 from collections import defaultdict
 from asyncio import Lock
-from fastapi import FastAPI, UploadFile, Form, HTTPException
+from fastapi import FastAPI, UploadFile, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 from typing import Literal, Annotated
 from pydantic import AfterValidator
 import time
@@ -39,8 +42,17 @@ def handle_default_openai_model(model_name: str) -> str:
 # Annotated ModelName for validation and defaults
 ModelName = Annotated[str, AfterValidator(handle_default_openai_model)]
 
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
 # FastAPI app instance
 app = FastAPI()
+app.add_middleware(RequestIDMiddleware)
 
 """
 OpenAI-like endpoint to transcribe audio files using the Whisper ASR model.
@@ -64,6 +76,7 @@ Returns:
 """
 @app.post("/v1/audio/transcriptions")
 async def transcribe_audio(
+    request: Request,
     file: Annotated[UploadFile, Form()],
     model: Annotated[ModelName, Form()] = config.whisper.model,
     language: Annotated[Language, Form()] = config.default_language,
@@ -80,8 +93,10 @@ async def transcribe_audio(
     highlight_words: Annotated[bool, Form()] = False,
     diarize: Annotated[bool, Form()] = False,
 ):
+    request_id = request.state.request_id
+    logger.debug(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()  # Start the timer
-    logger.debug(f"Received request to transcribe {file.filename} with parameters: \
+    logger.debug(f"Request ID: {request_id} - Received request to transcribe {file.filename} with parameters: \
         model: {model}, \
         language: {language}, \
         prompt: {prompt}, \
@@ -121,17 +136,15 @@ async def transcribe_audio(
             response_format=response_format,
             whispermodel=model_instance,
             highlight_words=highlight_words,
-            diarize=diarize
+            diarize=diarize,
+            request_id=request_id
         )
     except Exception as e:
-        logger.exception(f"Transcription failed: {e}")
+        logger.exception(f"Request ID: {request_id} - Transcription failed: {e}")
         raise HTTPException(status_code=500, detail="Internal server error") from e
 
-    total_time = time.time() - start_time  # Calculate the total time taken
-    logger.info(f"Transcription process took {total_time:.2f} seconds")
-
-    if stream:
-        return StreamingResponse(transcription.stream(), media_type="text/event-stream")
+    total_time = time.time() - start_time
+    logger.info(f"Request ID: {request_id} - Transcription process took {total_time:.2f} seconds")
 
     return transcription
 

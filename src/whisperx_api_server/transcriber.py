@@ -83,17 +83,18 @@ async def transcribe(
     response_format,
     whispermodel,
     highlight_words,
-    diarize
+    diarize,
+    request_id
 ):
     start_time = time.time()  # Start timing
     file_path = f"/tmp/{audio_file.filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(audio_file.file, buffer)
 
-    logger.info(f"Saving uploaded file took {time.time() - start_time:.2f} seconds")
+    logger.info(f"Request ID: {request_id} - Saving uploaded file took {time.time() - start_time:.2f} seconds")
 
     try:
-        logger.info(f"Transcribing {audio_file.filename} with model: {whispermodel.model_size_or_path} and options: {asr_options}")
+        logger.info(f"Request ID: {request_id} - Transcribing {audio_file.filename} with model: {whispermodel.model_size_or_path} and options: {asr_options}")
         model_loading_start = time.time()
         model = whisperx_transcribe.load_model(
             whisper_arch=whispermodel.model_size_or_path,
@@ -106,23 +107,23 @@ async def transcribe(
             vad_options=config.whisper.vad_options,
             model=whispermodel,
         )
-        logger.info(f"Loading model took {time.time() - model_loading_start:.2f} seconds")
+        logger.info(f"Request ID: {request_id} - Loading model took {time.time() - model_loading_start:.2f} seconds")
 
         audio_loading_start = time.time()
         audio = whisperx_audio.load_audio(file_path)
-        logger.info(f"Loading audio took {time.time() - audio_loading_start:.2f} seconds")
+        logger.info(f"Request ID: {request_id} - Loading audio took {time.time() - audio_loading_start:.2f} seconds")
 
         transcription_start = time.time()
         result = model.transcribe(audio=audio, batch_size=batch_size)
-        logger.info(f"Transcription took {time.time() - transcription_start:.2f} seconds")
+        logger.info(f"Request ID: {request_id} - Transcription took {time.time() - transcription_start:.2f} seconds")
 
         alignment_model_start = time.time()
         model_a, metadata = load_align_model_cached(
             language_code=result["language"],
             device=whispermodel.device
         )
-        logger.info("Alignment model loaded")
-        logger.info(f"Loading alignment model took {time.time() - alignment_model_start:.2f} seconds")
+        logger.info(f"Request ID: {request_id} - Alignment model loaded")
+        logger.info(f"Request ID: {request_id} - Loading alignment model took {time.time() - alignment_model_start:.2f} seconds")
 
         alignment_start = time.time()
         result["segments"] = whisperx_alignment.align(
@@ -133,31 +134,31 @@ async def transcribe(
             device=whispermodel.device,
             return_char_alignments=False
         )
-        logger.info(f"Alignment took {time.time() - alignment_start:.2f} seconds")
+        logger.info(f"Request ID: {request_id} - Alignment took {time.time() - alignment_start:.2f} seconds")
 
         if diarize:
             diarize_start = time.time()
 
-            logger.info("Loading diarization model")
+            logger.info(f"Request ID: {request_id} - Loading diarization model")
 
             diarize_model = load_diarize_model_cached(model_name="tensorlake/speaker-diarization-3.1", device=whispermodel.device)
 
-            logger.info("Diarization model loaded. Starting diarization...")
+            logger.info(f"Request ID: {request_id} - Diarization model loaded. Starting diarization...")
 
             diarize_segments = diarize_model(audio)
 
             result["segments"] = whisperx_diarize.assign_word_speakers(diarize_segments, result["segments"])
 
-            logger.info(f"Diarization took {time.time() - diarize_start:.2f} seconds")
+            logger.info(f"Request ID: {request_id} - Diarization took {time.time() - diarize_start:.2f} seconds")
 
         result["text"] = '\n'.join([segment["text"].strip() for segment in result["segments"]["segments"] if segment["text"].strip()])
 
-        logger.info(f"Transcription completed for {audio_file.filename}")
+        logger.info(f"Request ID: {request_id} - Transcription completed for {audio_file.filename}")
 
     finally:
         try:
             os.remove(file_path)
         except Exception:
-            logger.error(f"Could not remove temporary file: {file_path}")
+            logger.error(f"Request ID: {request_id} - Could not remove temporary file: {file_path}")
 
     return format_transcription(result, response_format, highlight_words=highlight_words)

@@ -65,6 +65,9 @@ def format_transcription(transcript, format, **kwargs):
         return {"text": transcript.get("text", "")}
     elif format == "verbose_json":
         return transcript
+    elif format == "vtt_json":
+        transcript["vtt_text"] = handle_whisperx_format(transcript, WriteVTT, options)
+        return transcript
     elif format == "text":
         return transcript.get("text", "")
     elif format == "srt":

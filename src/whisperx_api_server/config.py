@@ -8,6 +8,7 @@ class ResponseFormat(str, Enum):
     TEXT = "text"
     JSON = "json"
     VERBOSE_JSON = "verbose_json"
+    VTT_JSON = "vtt_json"
     SRT = "srt"
     VTT = "vtt"
     AUD = "aud" # Audacity

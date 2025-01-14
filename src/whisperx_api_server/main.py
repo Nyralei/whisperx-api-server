@@ -1,11 +1,8 @@
 import logging
 import uuid
-from collections import defaultdict
-from asyncio import Lock
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 from typing import Literal, Annotated
 from pydantic import AfterValidator
 import time

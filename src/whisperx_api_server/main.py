@@ -54,6 +54,7 @@ app.add_middleware(RequestIDMiddleware)
 OpenAI-like endpoint to transcribe audio files using the Whisper ASR model.
 
 Args:
+    request (Request): The HTTP request object.
     file (UploadFile): The audio file to transcribe.
     model (ModelName): The model to use for the transcription.
     language (Language): The language to use for the transcription. Defaults to "en".

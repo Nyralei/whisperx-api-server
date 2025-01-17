@@ -1,6 +1,7 @@
 import logging
 import uuid
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Literal, Annotated
 from pydantic import AfterValidator
@@ -10,6 +11,7 @@ import whisperx_api_server.transcriber as transcriber
 from whisperx_api_server.config import (
     Language,
     ResponseFormat,
+    MediaType,
     config,
 )
 from whisperx_api_server.models import (
@@ -89,7 +91,7 @@ async def transcribe_audio(
     suppress_numerals: Annotated[bool, Form()] = True,
     highlight_words: Annotated[bool, Form()] = False,
     diarize: Annotated[bool, Form()] = False,
-):
+) -> Response:
     request_id = request.state.request_id
     logger.debug(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()  # Start the timer
@@ -147,70 +149,79 @@ async def transcribe_audio(
 
 @app.get("/healthcheck")
 def health_check():
-    return {"status": "healthy"}
+    return JSONResponse(content={"status": "healthy"}, media_type=MediaType.APPLICATION_JSON)
 
 @app.get("/models/list")
 def list_models():
     global model_instances
-    return {
-        "models": list(model_instances.keys())
-    }
+    return JSONResponse(content={"models": list(model_instances.keys())}, media_type=MediaType.APPLICATION_JSON)
 
 @app.post("/models/unload")
 def unload_model(model: Annotated[ModelName, Form()]):
-    if model not in model_instances:
-        return {"status": "error", "message": f"Model {model} not found"}
-    del model_instances[model]
-    return {"status": "success"}
+    try:
+        if model in model_instances:
+            del model_instances[model]
+            response_data = {"status": "success"}
+        else:
+            response_data = {"status": "error", "message": f"Model {model} not found"}
+        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 @app.post("/models/load")
 async def load_model(model: Annotated[ModelName, Form()]):
     try:
         await load_model_instance(model)
-        return {"status": "success", "model": model}
+        return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 @app.get("/align_models/list")
 def list_align_models():
     global align_model_instances
-    return {
-        "models": list(align_model_instances.keys())
-    }
+    return JSONResponse(content={"models": list(align_model_instances.keys())}, media_type=MediaType.APPLICATION_JSON)
 
 @app.post("/align_models/unload")
 def unload_align_model(language: Annotated[Language, Form()]):
-    if language not in align_model_instances:
-        return {"status": "error", "message": f"Model with language {language} not found"}
-    del align_model_instances[language]
-    return {"status": "success"}
+    try:
+        if language in align_model_instances:
+            del align_model_instances[language]
+            response_data = {"status": "success"}
+        else:
+            response_data = {"status": "error", "message": f"Model with language {language} not found"}
+        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 @app.post("/align_models/load")
-async def load_align_model(language: Annotated[Language, Form()]):
+def load_align_model(language: Annotated[Language, Form()]):
     try:
-        await load_align_model_cached(language)
-        return {"status": "success", "model": language}
+        load_align_model_cached(language, transcriber.check_device())
+        return JSONResponse(content={"status": "success", "model": language}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
     
 @app.get("/diarize_models/list")
 def list_diarize_models():
     global diarize_model_instances
-    return {
-        "models": list(diarize_model_instances.keys())
-    }
+    return JSONResponse(content={"models": list(diarize_model_instances.keys())}, media_type=MediaType.APPLICATION_JSON)
 
 @app.post("/diarize_models/unload")
 def unload_diarize_model(model: Annotated[ModelName, Form()]):
-    if model not in diarize_model_instances:
-        return {"status": "error", "message": f"Model {model} not found"}
-    del diarize_model_instances[model]
-    return {"status": "success"}
+    try:
+        if model in diarize_model_instances:
+            del diarize_model_instances[model]
+            response_data = {"status": "success"}
+        else:
+            response_data = {"status": "error", "message": f"Model {model} not found"}
+        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 @app.post("/diarize_models/load")
-async def load_diarize_model(model: Annotated[ModelName, Form()]):
+def load_diarize_model(model: Annotated[ModelName, Form()]):
     try:
-        await load_diarize_model_cached(model)
-        return {"status": "success", "model": model}
+        load_diarize_model_cached(model, transcriber.check_device())
+        return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)

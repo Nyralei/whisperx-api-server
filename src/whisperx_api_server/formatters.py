@@ -1,4 +1,6 @@
 from whisperx.utils import WriteSRT, WriteVTT, WriteAudacity
+from fastapi.responses import JSONResponse, Response
+from whisperx_api_server.config import MediaType
 
 class ListWriter:
     """Helper class to store written lines in memory."""
@@ -44,14 +46,14 @@ def handle_whisperx_format(transcript, writer_class, options):
 
     return output.get_output()
 
-def format_transcription(transcript, format, **kwargs):
+def format_transcription(transcript, format, **kwargs) -> Response:
     """
-    Format a transcript into a given format.
+    Format a transcript into a given format and return a FastAPI Response object.
     
     :param transcript: The transcript to format, a dictionary with a "segments" key that contains a list of segments with start and end times and text.
     :param format: The format to generate the transcript in. Supported formats are "json", "text", "srt", "vtt" and "aud".
     :param kwargs: Additional keyword arguments to pass to the formatter.
-    :return: The formatted transcript, a string if format is "text", "srt", "vtt" or "aud", or a JSON-serializable dictionary if format is "json" or "verbose_json".
+    :return: A FastAPI Response or JSONResponse object with the formatted transcript and appropriate media type.
     """
     # Default options, used for formats imported from whisperx.utils
     defaults = {
@@ -62,19 +64,23 @@ def format_transcription(transcript, format, **kwargs):
     options = update_options(kwargs, defaults)
 
     if format == "json":
-        return {"text": transcript.get("text", "")}
+        response_data = {"text": transcript.get("text", "")}
+        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
     elif format == "verbose_json":
-        return transcript
+        return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
     elif format == "vtt_json":
         transcript["vtt_text"] = handle_whisperx_format(transcript, WriteVTT, options)
-        return transcript
+        return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
     elif format == "text":
-        return transcript.get("text", "")
+        return Response(content=transcript.get("text", ""), media_type=MediaType.TEXT_PLAIN)
     elif format == "srt":
-        return handle_whisperx_format(transcript, WriteSRT, options)
+        content = handle_whisperx_format(transcript, WriteSRT, options)
+        return Response(content=content, media_type=MediaType.TEXT_PLAIN)
     elif format == "vtt":
-        return handle_whisperx_format(transcript, WriteVTT, options)
+        content = handle_whisperx_format(transcript, WriteVTT, options)
+        return Response(content=content, media_type=MediaType.TEXT_VTT)
     elif format == "aud":
-        return handle_whisperx_format(transcript, WriteAudacity, options)
+        content = handle_whisperx_format(transcript, WriteAudacity, options)
+        return Response(content=content, media_type=MediaType.TEXT_PLAIN)
     else:
         raise ValueError(f"Unsupported format: {format}")

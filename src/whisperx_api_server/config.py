@@ -13,6 +13,11 @@ class ResponseFormat(str, Enum):
     VTT = "vtt"
     AUD = "aud" # Audacity
 
+class MediaType(str, Enum):
+    APPLICATION_JSON = "application/json"
+    TEXT_PLAIN = "text/plain"
+    TEXT_VTT = "text/vtt"
+
 class Language(str, Enum):
     AF = "af"
     AM = "am"

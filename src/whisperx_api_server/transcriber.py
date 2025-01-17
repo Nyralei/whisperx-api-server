@@ -12,7 +12,11 @@ import logging
 import time
 import tempfile
 
-from whisperx_api_server.config import config
+from whisperx_api_server.config import (
+    config,
+    Language,
+    ResponseFormat
+)
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.models import (
     load_align_model_cached,
@@ -78,14 +82,14 @@ async def initialize_model(model_name) -> CustomWhisperModel:
 
 async def transcribe(
     audio_file: UploadFile,
-    batch_size,
-    asr_options,
-    language,
-    response_format,
-    whispermodel,
-    highlight_words,
-    diarize,
-    request_id
+    batch_size: int,
+    asr_options: dict,
+    language: Language,
+    response_format: ResponseFormat,
+    whispermodel: CustomWhisperModel,
+    highlight_words: bool,
+    diarize: bool,
+    request_id: str,
 ):
     start_time = time.time()  # Start timing
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{audio_file.filename}") as temp_file:

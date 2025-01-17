@@ -3,6 +3,9 @@ __pycache__
 .gitignore
 README.md
 models
+venv
+scripts
+.vscode
 whisperx/hf-home
 whisperx/torch-home
 whisperx/test-files

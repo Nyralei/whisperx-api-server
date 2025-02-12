@@ -90,6 +90,7 @@ async def transcribe(
     response_format: ResponseFormat,
     whispermodel: CustomWhisperModel,
     highlight_words: bool,
+    align: bool,
     diarize: bool,
     request_id: str,
 ):
@@ -125,24 +126,25 @@ async def transcribe(
         result = model.transcribe(audio=audio, batch_size=batch_size)
         logger.info(f"Request ID: {request_id} - Transcription took {time.time() - transcription_start:.2f} seconds")
 
-        alignment_model_start = time.time()
-        model_a, metadata = load_align_model_cached(
-            language_code=result["language"],
-            device=whispermodel.device
-        )
-        logger.info(f"Request ID: {request_id} - Alignment model loaded")
-        logger.info(f"Request ID: {request_id} - Loading alignment model took {time.time() - alignment_model_start:.2f} seconds")
+        if align or diarize:
+            alignment_model_start = time.time()
+            model_a, metadata = load_align_model_cached(
+                language_code=result["language"],
+                device=whispermodel.device
+            )
+            logger.info(f"Request ID: {request_id} - Alignment model loaded")
+            logger.info(f"Request ID: {request_id} - Loading alignment model took {time.time() - alignment_model_start:.2f} seconds")
 
-        alignment_start = time.time()
-        result["segments"] = whisperx_alignment.align(
-            transcript=result["segments"],
-            model=model_a,
-            align_model_metadata=metadata,
-            audio=audio,
-            device=whispermodel.device,
-            return_char_alignments=False
-        )
-        logger.info(f"Request ID: {request_id} - Alignment took {time.time() - alignment_start:.2f} seconds")
+            alignment_start = time.time()
+            result["segments"] = whisperx_alignment.align(
+                transcript=result["segments"],
+                model=model_a,
+                align_model_metadata=metadata,
+                audio=audio,
+                device=whispermodel.device,
+                return_char_alignments=False
+            )
+            logger.info(f"Request ID: {request_id} - Alignment took {time.time() - alignment_start:.2f} seconds")
 
         if diarize:
             diarize_start = time.time()
@@ -159,7 +161,10 @@ async def transcribe(
 
             logger.info(f"Request ID: {request_id} - Diarization took {time.time() - diarize_start:.2f} seconds")
 
-        result["text"] = '\n'.join([segment["text"].strip() for segment in result["segments"]["segments"] if segment["text"].strip()])
+        if align or diarize:
+            result["text"] = '\n'.join([segment["text"].strip() for segment in result["segments"]["segments"] if segment["text"].strip()])
+        else:
+            result["text"] = '\n'.join([segment["text"].strip() for segment in result["segments"] if segment["text"].strip()])
 
         logger.info(f"Request ID: {request_id} - Transcription completed for {audio_file.filename}")
 

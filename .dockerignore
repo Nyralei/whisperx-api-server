@@ -9,3 +9,5 @@ scripts
 whisperx/hf-home
 whisperx/torch-home
 whisperx/test-files
+Dockerfile*
+.scannerwork

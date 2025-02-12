@@ -46,4 +46,9 @@ COPY src/whisperx_api_server ./whisperx_api_server
 ENV UVICORN_HOST=0.0.0.0
 ENV UVICORN_PORT=8000
 
+COPY ./cuda-docker-entrypoint.sh /workspace/docker-entrypoint.sh
+RUN chmod +x /workspace/docker-entrypoint.sh
+
+ENTRYPOINT [ "/workspace/docker-entrypoint.sh" ]
+
 CMD ["uvicorn", "--factory", "whisperx_api_server.main:create_app"]

@@ -6,6 +6,7 @@ from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Literal, Annotated
 from pydantic import AfterValidator
+from http import HTTPStatus
 import time
 
 
@@ -67,6 +68,7 @@ Args:
     hotwords (str): The hotwords to use for the transcription.
     suppress_numerals (bool): Whether to suppress numerals in the transcription. Defaults to True.
     highlight_words (bool): Whether to highlight words in the transcription (Applies only to VTT and SRT). Defaults to False.
+    align (bool): Whether to do transcription timings alignment. Defaults to True.
     diarize (bool): Whether to diarize the transcription. Defaults to False.
 
 Returns:
@@ -94,6 +96,7 @@ async def transcribe_audio(
     hotwords: Annotated[str, Form()] = None,
     suppress_numerals: Annotated[bool, Form()] = True,
     highlight_words: Annotated[bool, Form()] = False,
+    align: Annotated[bool, Form()] = True,
     diarize: Annotated[bool, Form()] = False,
 ) -> Response:
     if model is None:
@@ -117,7 +120,21 @@ async def transcribe_audio(
         hotwords: {hotwords}, \
         suppress_numerals: {suppress_numerals} \
         highlight_words: {highlight_words} \
+        align: {align}, \
         diarize: {diarize}")
+    
+    if not align:
+        if response_format in ('vtt', 'srt', 'aud', 'vtt_json'):
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR, 
+                detail="Subtitles format ('vtt', 'srt', 'aud', 'vtt_json') requires alignment to be enabled."
+            )
+        
+        if diarize:
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR, 
+                detail="Diarization requires alignment to be enabled."
+            )
 
     # Determine if word timestamps are required
     word_timestamps = "word" in timestamp_granularities
@@ -146,15 +163,18 @@ async def transcribe_audio(
             response_format=response_format,
             whispermodel=model_instance,
             highlight_words=highlight_words,
+            align=align,
             diarize=diarize,
             request_id=request_id
         )
     except Exception as e:
         logger.exception(f"Request ID: {request_id} - Transcription failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error") from e
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, 
+            detail="An unexpected error occurred while processing the transcription request."
+        ) from e
 
     total_time = time.time() - start_time
     logger.info(f"Request ID: {request_id} - Transcription process took {total_time:.2f} seconds")
 
     return transcription
-

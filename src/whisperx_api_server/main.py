@@ -39,14 +39,16 @@ def create_app() -> FastAPI:
     logger.debug(f"Config: {config}")
 
     dependencies = []
-    if config.api_key is not None:
+    if config.api_key is not None or config.api_keys_file is not None:
         dependencies.append(ApiKeyDependency)
 
-    app = FastAPI(dependencies=dependencies)
+    app = FastAPI()
 
+    # Misc router is for not protected endpoints like healthcheck
     app.include_router(misc_router)
-    app.include_router(models_router)
-    app.include_router(transcribe_router)
+    
+    app.include_router(models_router, dependencies=dependencies)
+    app.include_router(transcribe_router, dependencies=dependencies)
 
     if config.allow_origins is not None:
         app.add_middleware(

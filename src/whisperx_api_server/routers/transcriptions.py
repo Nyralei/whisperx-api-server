@@ -1,12 +1,18 @@
 import logging
 import uuid
 from .models import handle_default_openai_model
-from fastapi import APIRouter, UploadFile, Form, HTTPException, Request
+from fastapi import (
+    APIRouter, 
+    UploadFile, 
+    Form, 
+    HTTPException, 
+    Request,
+    status
+)
 from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Literal, Annotated
 from pydantic import AfterValidator
-from http import HTTPStatus
 import time
 
 
@@ -126,13 +132,13 @@ async def transcribe_audio(
     if not align:
         if response_format in ('vtt', 'srt', 'aud', 'vtt_json'):
             raise HTTPException(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR, 
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 detail="Subtitles format ('vtt', 'srt', 'aud', 'vtt_json') requires alignment to be enabled."
             )
         
         if diarize:
             raise HTTPException(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR, 
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 detail="Diarization requires alignment to be enabled."
             )
 
@@ -170,7 +176,7 @@ async def transcribe_audio(
     except Exception as e:
         logger.exception(f"Request ID: {request_id} - Transcription failed: {e}")
         raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail="An unexpected error occurred while processing the transcription request."
         ) from e
 

@@ -179,6 +179,8 @@ class Config(BaseSettings):
 
     api_key: str | None = None
 
+    api_keys_file: str | None = None
+
     log_level: str = "DEBUG"
 
     host: str = Field(alias="UVICORN_HOST", default="0.0.0.0")

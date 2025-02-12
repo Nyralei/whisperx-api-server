@@ -36,4 +36,7 @@ WORKDIR /workspace
 
 COPY src/whisperx_api_server ./whisperx_api_server
 
-CMD ["uvicorn", "whisperx_api_server.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "asyncio", "--log-level", "debug", "--log-config", "whisperx_api_server/logging_config.json"]
+ENV UVICORN_HOST=0.0.0.0
+ENV UVICORN_PORT=8000
+
+CMD ["uvicorn", "--factory", "whisperx_api_server.main:create_app"]

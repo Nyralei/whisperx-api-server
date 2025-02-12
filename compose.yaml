@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile.cuda
     healthcheck:
       test: ["CMD-SHELL", "curl --fail http://localhost:8000/healthcheck || exit 1"]
-    command: uvicorn whisperx_api_server.main:app --host 0.0.0.0 --port 8000 --workers 1 --loop asyncio --log-level debug --log-config whisperx_api_server/logging_config.json
+    command: uvicorn --factory whisperx_api_server.main:create_app
     ports:
       - 8000:8000
     volumes:
@@ -26,7 +26,7 @@ services:
       dockerfile: Dockerfile.cpu
     healthcheck:
       test: ["CMD-SHELL", "curl --fail http://localhost:8000/healthcheck || exit 1"]
-    command: uvicorn whisperx_api_server.main:app --host 0.0.0.0 --port 8000 --loop asyncio --log-level debug --log-config whisperx_api_server/logging_config.json
+    command: uvicorn --factory whisperx_api_server.main:create_app
     ports:
       - 8000:8000
     volumes:

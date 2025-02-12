@@ -1,7 +1,6 @@
-fastapi==0.115.6
-uvicorn==0.32.1
-pydantic==2.10.3
-aiohttp==3.11.10
+fastapi==0.115.8
+uvicorn==0.34.0
+pydantic==2.10.6
 whisperx @ git+https://github.com/Nyralei/whisperX.git@fc40c33d8fc275ffa14861f0532fdae13b5319db
-pydantic-settings==2.6.1
-python-multipart==0.0.19
+pydantic-settings==2.7.1
+python-multipart==0.0.20

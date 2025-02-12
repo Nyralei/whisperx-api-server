@@ -1,17 +1,13 @@
-
 import logging
 from collections import defaultdict
 from asyncio import Lock
-from whisperx_api_server.config import (
-    config,
-)
 import whisperx_api_server.transcriber as transcriber
+from whisperx_api_server.dependencies import get_config
 
 from whisperx import alignment as whisperx_alignment
 from whisperx import diarize as whisperx_diarize
 
-logger = logging.getLogger("transcriber_logger")
-logger.setLevel(config.log_level)
+logger = logging.getLogger(__name__)
 
 model_instances = {}
 model_locks = defaultdict(Lock)
@@ -37,7 +33,12 @@ async def load_model_instance(model_name: str):
             model_instances[model_name] = await transcriber.initialize_model(model_name)
         return model_instances[model_name]
     
-def load_align_model_cached(language_code, device, model_name=None, model_dir=None):
+def load_align_model_cached(
+        language_code: str,
+        device: str,
+        model_name: str = None,
+        model_dir: str = None
+    ):
     """
     Loads and caches alignment models based on language codes to optimize repeated use.
 
@@ -51,6 +52,8 @@ def load_align_model_cached(language_code, device, model_name=None, model_dir=No
     - tuple: The loaded model and metadata.
     """
     global align_model_instances
+
+    config = get_config()
 
     if "multilingual" in config.alignment.models:
         model_name = config.alignment.models["multilingual"]
@@ -93,7 +96,10 @@ def load_align_model_cached(language_code, device, model_name=None, model_dir=No
 
     return align_model, align_metadata
 
-def load_diarize_model_cached(model_name, device):
+def load_diarize_model_cached(
+        model_name: str,
+        device: str
+    ):
     global diarize_model_instances
 
     if model_name in diarize_model_instances:

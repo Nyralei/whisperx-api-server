@@ -13,18 +13,17 @@ import time
 import tempfile
 
 from whisperx_api_server.config import (
-    config,
     Language,
     ResponseFormat
 )
+from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.models import (
     load_align_model_cached,
     load_diarize_model_cached,
 )
 
-logger = logging.getLogger("transcriber_logger")
-logger.setLevel(config.log_level)
+logger = logging.getLogger(__name__)
 
 class CustomWhisperModel(whisperx_asr.WhisperModel):
     def __init__(
@@ -66,7 +65,10 @@ def check_device():
         logger.error("Could not determine device. Using 'cpu' instead.")
         return "cpu"
 
-async def initialize_model(model_name) -> CustomWhisperModel:
+async def initialize_model(
+        model_name: str
+    ) -> CustomWhisperModel:
+    config = get_config()
     inference_device = config.whisper.inference_device.value
     if inference_device == "auto":
         inference_device = check_device()
@@ -91,6 +93,7 @@ async def transcribe(
     diarize: bool,
     request_id: str,
 ):
+    config = get_config()
     start_time = time.time()  # Start timing
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{audio_file.filename}") as temp_file:
         temp_file.write(audio_file.file.read())

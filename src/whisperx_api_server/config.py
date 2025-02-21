@@ -161,10 +161,18 @@ class WhisperConfig(BaseModel):
     vad_method: VadMethod = Field(default=VadMethod.PYANNOTE)
     vad_model: str = Field(default=None)
     vad_options: dict = Field(default=None)
-
+    cache: bool = Field(default=True)
+    preload_model: str = Field(default=None)
 
 class AlignConfig(BaseModel):
     models: dict = Field(default_factory=dict)
+    whitelist: list = Field(default_factory=list)
+    cache: bool = Field(default=True)
+    preload_model: str = Field(default=None)
+
+class DiarizeConfig(BaseModel):
+    cache: bool = Field(default=True)
+    preload_model: str = Field(default=None)
 
 class Config(BaseSettings):
     """
@@ -196,3 +204,5 @@ class Config(BaseSettings):
     whisper: WhisperConfig = WhisperConfig()
 
     alignment: AlignConfig = AlignConfig()
+
+    diarization: DiarizeConfig = DiarizeConfig()

@@ -1,12 +1,8 @@
 import os
-import shutil
-import torch
-from whisperx import asr as whisperx_asr
 from whisperx import transcribe as whisperx_transcribe
 from whisperx import audio as whisperx_audio
 from whisperx import alignment as whisperx_alignment
 from whisperx import diarize as whisperx_diarize
-from typing import Union, List, Optional
 from fastapi import UploadFile
 import logging
 import time
@@ -19,68 +15,12 @@ from whisperx_api_server.config import (
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.models import (
+    CustomWhisperModel,
     load_align_model_cached,
     load_diarize_model_cached,
 )
 
 logger = logging.getLogger(__name__)
-
-class CustomWhisperModel(whisperx_asr.WhisperModel):
-    def __init__(
-        self,
-        model_size_or_path: str,
-        device: str = "auto",
-        device_index: Union[int, List[int]] = 0,
-        compute_type: str = "default",
-        cpu_threads: int = 0,
-        num_workers: int = 1,
-        download_root: Optional[str] = None,
-        local_files_only: bool = False,
-    ):
-        # Call the parent class's __init__ method
-        super().__init__(
-            model_size_or_path=model_size_or_path,
-            device=device,
-            device_index=device_index,
-            compute_type=compute_type,
-            cpu_threads=cpu_threads,
-            num_workers=num_workers,
-            download_root=download_root,
-            local_files_only=local_files_only,
-        )
-        # Explicitly store the parameters as instance attributes
-        self.model_size_or_path = model_size_or_path
-        self.device = device
-        self.device_index = device_index
-        self.compute_type = compute_type
-        self.cpu_threads = cpu_threads
-        self.num_workers = num_workers
-        self.download_root = download_root
-        self.local_files_only = local_files_only
-
-def check_device():
-    try:
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        logger.error("Could not determine device. Using 'cpu' instead.")
-        return "cpu"
-
-async def initialize_model(
-        model_name: str
-    ) -> CustomWhisperModel:
-    config = get_config()
-    inference_device = config.whisper.inference_device.value
-    if inference_device == "auto":
-        inference_device = check_device()
-
-    return CustomWhisperModel(
-        model_size_or_path=model_name,
-        device=inference_device,
-        device_index=config.whisper.device_index,
-        compute_type=config.whisper.compute_type.value,
-        cpu_threads=config.whisper.cpu_threads,
-        num_workers=config.whisper.num_workers,
-    )
 
 async def transcribe(
     audio_file: UploadFile,
@@ -128,9 +68,9 @@ async def transcribe(
 
         if align or diarize:
             alignment_model_start = time.time()
-            model_a, metadata = load_align_model_cached(
+            logger.info(f"Request ID: {request_id} - Loading alignment model")
+            model_a, metadata = await load_align_model_cached(
                 language_code=result["language"],
-                device=whispermodel.device
             )
             logger.info(f"Request ID: {request_id} - Alignment model loaded")
             logger.info(f"Request ID: {request_id} - Loading alignment model took {time.time() - alignment_model_start:.2f} seconds")
@@ -147,13 +87,16 @@ async def transcribe(
             logger.info(f"Request ID: {request_id} - Alignment took {time.time() - alignment_start:.2f} seconds")
 
         if diarize:
-            diarize_start = time.time()
+            diarization_model_start = time.time()
 
             logger.info(f"Request ID: {request_id} - Loading diarization model")
 
-            diarize_model = load_diarize_model_cached(model_name="tensorlake/speaker-diarization-3.1", device=whispermodel.device)
+            diarize_model = await load_diarize_model_cached(model_name="tensorlake/speaker-diarization-3.1")
 
-            logger.info(f"Request ID: {request_id} - Diarization model loaded. Starting diarization...")
+            logger.info(f"Request ID: {request_id} - Loaded diarization model")
+            logger.info(f"Request ID: {request_id} - Loading diarization model took {time.time() - diarization_model_start:.2f} seconds")
+
+            diarize_start = time.time()
 
             diarize_segments = diarize_model(audio)
 
@@ -167,7 +110,9 @@ async def transcribe(
             result["text"] = '\n'.join([segment["text"].strip() for segment in result["segments"] if segment["text"].strip()])
 
         logger.info(f"Request ID: {request_id} - Transcription completed for {audio_file.filename}")
-
+    except Exception as e:
+        logger.error(f"Request ID: {request_id} - Transcription failed for {audio_file.filename} with error: {e}")
+        raise
     finally:
         try:
             os.remove(file_path)

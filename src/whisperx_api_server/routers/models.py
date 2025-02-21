@@ -17,6 +17,7 @@ from whisperx_api_server.models import (
     model_instances,
     align_model_instances,
     diarize_model_instances,
+    unload_model_object,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,9 @@ def list_models():
 def unload_model(model: Annotated[ModelName, Form()]):
     try:
         if model in model_instances:
-            del model_instances[model]
+            model_data = model_instances.pop(model, None)
+            if model_data is not None:
+                unload_model_object(model_data)
             response_data = {"status": "success"}
         else:
             response_data = {"status": "error", "message": f"Model {model} not found"}
@@ -89,7 +92,10 @@ def list_align_models():
 def unload_align_model(language: Annotated[Language, Form()]):
     try:
         if language in align_model_instances:
-            del align_model_instances[language]
+            align_model_data = align_model_instances.pop(language, None)
+            if align_model_data is not None:
+                unload_model_object(align_model_data.get("model"))
+                del align_model_data
             response_data = {"status": "success"}
         else:
             response_data = {"status": "error", "message": f"Model with language {language} not found"}
@@ -102,9 +108,9 @@ def unload_align_model(language: Annotated[Language, Form()]):
     description="Load an align model",
     tags=["models", "align"],
 )
-def load_align_model(language: Annotated[Language, Form()]):
+async def load_align_model(language: Annotated[Language, Form()]):
     try:
-        load_align_model_cached(language, transcriber.check_device())
+        await load_align_model_cached(language)
         return JSONResponse(content={"status": "success", "model": language}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
@@ -126,7 +132,9 @@ def list_diarize_models():
 def unload_diarize_model(model: Annotated[ModelName, Form()]):
     try:
         if model in diarize_model_instances:
-            del diarize_model_instances[model]
+            diarize_model_data = diarize_model_instances.pop(model, None)
+            if diarize_model_data is not None:
+                unload_model_object(diarize_model_data)
             response_data = {"status": "success"}
         else:
             response_data = {"status": "error", "message": f"Model {model} not found"}
@@ -139,9 +147,9 @@ def unload_diarize_model(model: Annotated[ModelName, Form()]):
     description="Load a diarize model",
     tags=["models", "diarize"],
 )
-def load_diarize_model(model: Annotated[ModelName, Form()]):
+async def load_diarize_model(model: Annotated[ModelName, Form()]):
     try:
-        load_diarize_model_cached(model, transcriber.check_device())
+        await load_diarize_model_cached(model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)

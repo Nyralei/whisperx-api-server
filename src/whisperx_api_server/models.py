@@ -51,6 +51,8 @@ class CustomWhisperModel(whisperx_asr.WhisperModel):
         num_workers: int = 1,
         download_root: Optional[str] = None,
         local_files_only: bool = False,
+        files: dict = None,
+        **model_kwargs,
     ):
         super().__init__(
             model_size_or_path=model_size_or_path,
@@ -61,6 +63,8 @@ class CustomWhisperModel(whisperx_asr.WhisperModel):
             num_workers=num_workers,
             download_root=download_root,
             local_files_only=local_files_only,
+            files=files,
+            **model_kwargs
         )
         self.model_size_or_path = model_size_or_path
         self.device = device
@@ -70,6 +74,8 @@ class CustomWhisperModel(whisperx_asr.WhisperModel):
         self.num_workers = num_workers
         self.download_root = download_root
         self.local_files_only = local_files_only
+        self.files = files
+        self.model_kwargs = model_kwargs
 
 
 def check_device():
@@ -107,6 +113,8 @@ async def initialize_model(model_name: str) -> CustomWhisperModel:
         compute_type=config.whisper.compute_type.value,
         cpu_threads=config.whisper.cpu_threads,
         num_workers=config.whisper.num_workers,
+        local_files_only=config.whisper.local_files_only,
+        download_root=config.whisper.download_root
     )
 
 

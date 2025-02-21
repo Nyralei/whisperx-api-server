@@ -93,7 +93,7 @@ async def transcribe(
 
             diarize_model = await load_diarize_model_cached(model_name="tensorlake/speaker-diarization-3.1")
 
-            logger.info(f"Request ID: {request_id} - Loaded diarization model")
+            logger.info(f"Request ID: {request_id} - Diarization model loaded. Starting diarization")
             logger.info(f"Request ID: {request_id} - Loading diarization model took {time.time() - diarization_model_start:.2f} seconds")
 
             diarize_start = time.time()

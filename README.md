@@ -5,12 +5,12 @@ WhisperX API Server is a FastAPI-based server designed to transcribe audio files
 Features
 1. Audio Transcription: Transcribe audio files using the Whisper ASR model.
 2. Model Caching: Load and cache models for reusability and faster performance.
-3. OpenAI-like API, based on https://platform.openai.com/docs/api-reference/audio/createTranscription
+3. OpenAI-like API, based on https://platform.openai.com/docs/api-reference/audio/createTranscription and https://platform.openai.com/docs/api-reference/audio/createTranslation
 
 ## API Endpoints
 
 ### `POST /v1/audio/transcriptions`
-This is the main endpoint for uploading audio files and receiving transcriptions.
+https://platform.openai.com/docs/api-reference/audio/createTranscription
 
 **Parameters**:
 - `file`: The audio file to transcribe.
@@ -19,13 +19,27 @@ This is the main endpoint for uploading audio files and receiving transcriptions
 - `prompt (str)`: Optional transcription prompt.
 - `response_format (str)`: The format of the transcription output. Defaults to `json`.
 - `temperature (float)`: Temperature setting for transcription. Default is `0.0`.
-- `timestamp_granularities (list)`: Granularity of timestamps, either `segment` or `word`. Default is `["segment"]`. Currently doesn't work with OpenAI client libraries.
-- `stream (bool)`: Enable streaming mode for real-time transcription. WIP.
+- `timestamp_granularities (list)`: Granularity of timestamps, either `segment` or `word`. Default is `["segment"]`.
+- `stream (bool)`: Enable streaming mode for real-time transcription. (Doesn't work.)
 - `hotwords (str)`: Optional hotwords for transcription.
 - `suppress_numerals (bool)`: Option to suppress numerals in the transcription. Default is `True`.
 - `highlight_words (bool)`: Highlight words in the transcription output for formats like VTT and SRT.
+- `align (bool)`: Option to do transcription timings alignment. Default is `True`.
+- `diarize (bool)`: Option to diarize the transcription. Default is `False`.
 
 **Returns**: Transcription results in the specified format.
+
+### `POST /v1/audio/translations`
+https://platform.openai.com/docs/api-reference/audio/createTranslation
+
+**Parameters**:
+- `file`: The audio file to translate.
+- `model (str)`: The Whisper model to use. Default is `config.whisper.model`.
+- `prompt (str)`: Optional translation prompt.
+- `response_format (str)`: The format of the translation output. Defaults to `json`.
+- `temperature (float)`: Temperature setting for translation. Default is `0.0`.
+
+**Returns**: Translation results in the specified format.
 
 ### `GET /healthcheck`
 Returns the current health status of the API server.

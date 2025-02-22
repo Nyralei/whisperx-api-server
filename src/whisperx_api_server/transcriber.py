@@ -3,6 +3,7 @@ from whisperx import transcribe as whisperx_transcribe
 from whisperx import audio as whisperx_audio
 from whisperx import alignment as whisperx_alignment
 from whisperx import diarize as whisperx_diarize
+from whisperx import types as whisperx_types
 from fastapi import UploadFile
 import logging
 import time
@@ -10,10 +11,8 @@ import tempfile
 
 from whisperx_api_server.config import (
     Language,
-    ResponseFormat
 )
 from whisperx_api_server.dependencies import get_config
-from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.models import (
     CustomWhisperModel,
     load_align_model_cached,
@@ -22,19 +21,19 @@ from whisperx_api_server.models import (
 
 logger = logging.getLogger(__name__)
 
+config = get_config()
+
 async def transcribe(
     audio_file: UploadFile,
-    batch_size: int,
-    asr_options: dict,
-    language: Language,
-    response_format: ResponseFormat,
-    whispermodel: CustomWhisperModel,
-    highlight_words: bool,
-    align: bool,
-    diarize: bool,
-    request_id: str,
-):
-    config = get_config()
+    batch_size: int = config.batch_size,
+    asr_options: dict = {},
+    language: Language = config.default_language,
+    whispermodel: CustomWhisperModel = config.whisper.model,
+    align: bool = False,
+    diarize: bool = False,
+    request_id: str = "",
+    task: str = "transcribe",
+) -> whisperx_types.TranscriptionResult:
     start_time = time.time()  # Start timing
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{audio_file.filename}") as temp_file:
         temp_file.write(audio_file.file.read())
@@ -55,6 +54,7 @@ async def transcribe(
             vad_method=config.whisper.vad_method,
             vad_options=config.whisper.vad_options,
             model=whispermodel,
+            task=task,
         )
         logger.info(f"Request ID: {request_id} - Loading model took {time.time() - model_loading_start:.2f} seconds")
 
@@ -63,7 +63,13 @@ async def transcribe(
         logger.info(f"Request ID: {request_id} - Loading audio took {time.time() - audio_loading_start:.2f} seconds")
 
         transcription_start = time.time()
-        result = model.transcribe(audio=audio, batch_size=batch_size)
+        result = model.transcribe(
+            audio=audio,
+            batch_size=batch_size,
+            num_workers=config.whisper.num_workers,
+            language=language,
+            task=task,
+        )
         logger.info(f"Request ID: {request_id} - Transcription took {time.time() - transcription_start:.2f} seconds")
 
         if align or diarize:
@@ -118,4 +124,4 @@ async def transcribe(
         except Exception:
             logger.error(f"Request ID: {request_id} - Could not remove temporary file: {file_path}")
 
-    return format_transcription(result, response_format, highlight_words=highlight_words)
+    return result

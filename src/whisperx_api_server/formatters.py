@@ -59,7 +59,7 @@ def format_transcription(transcript, format, **kwargs) -> Response:
     defaults = {
         "max_line_width": 1000,
         "max_line_count": None,
-        "highlight_words": kwargs.get("highlight_words", True)
+        "highlight_words": kwargs.get("highlight_words", False),
     }
     options = update_options(kwargs, defaults)
 

@@ -99,7 +99,7 @@ Returns:
 async def transcribe_audio(
     config: ConfigDependency,
     request: Request,
-    file: Annotated[UploadFile, Form()],
+    file: UploadFile,
     model: Annotated[ModelName, Form()] = None,
     language: Annotated[Language, Form()] = None,
     prompt: Annotated[str, Form()] = None,

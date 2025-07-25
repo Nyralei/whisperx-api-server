@@ -8,6 +8,8 @@ from fastapi import UploadFile
 import logging
 import time
 import tempfile
+import torch
+import gc
 
 from whisperx_api_server.config import (
     Language,
@@ -22,6 +24,13 @@ from whisperx_api_server.models import (
 logger = logging.getLogger(__name__)
 
 config = get_config()
+
+def cleanup_cache_only():
+    gc.collect()
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 async def transcribe(
     audio_file: UploadFile,
@@ -41,6 +50,8 @@ async def transcribe(
 
     logger.info(f"Request ID: {request_id} - Saving uploaded file took {time.time() - start_time:.2f} seconds")
 
+    audio = None
+    
     try:
         logger.info(f"Request ID: {request_id} - Transcribing {audio_file.filename} with model: {whispermodel.model_size_or_path} and options: {asr_options}")
         model_loading_start = time.time()
@@ -123,5 +134,12 @@ async def transcribe(
             os.remove(file_path)
         except Exception:
             logger.error(f"Request ID: {request_id} - Could not remove temporary file: {file_path}")
+        
+        if audio is not None:
+            del audio
+            logger.debug(f"Request ID: {request_id} - Audio data cleaned up")
+        
+        cleanup_cache_only()
+        logger.debug(f"Request ID: {request_id} - Cache cleanup completed")
 
     return result

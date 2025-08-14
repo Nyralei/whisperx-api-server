@@ -1,6 +1,6 @@
 ARG PYTHON_VERSION=3.10
 
-FROM python:${PYTHON_VERSION}-slim AS base
+FROM python:${PYTHON_VERSION}-slim-bookworm AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 

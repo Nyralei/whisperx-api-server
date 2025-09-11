@@ -35,7 +35,7 @@ def cleanup_cache_only():
 async def transcribe(
     audio_file: UploadFile,
     batch_size: int = config.batch_size,
-    chunk_size: int = 5,
+    chunk_size: int = 30,
     asr_options: dict = {},
     language: Language = config.default_language,
     whispermodel: CustomWhisperModel = config.whisper.model,

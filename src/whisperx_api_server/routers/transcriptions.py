@@ -87,6 +87,7 @@ Args:
     highlight_words (bool): Whether to highlight words in the transcription (Applies only to VTT and SRT). Defaults to False.
     align (bool): Whether to do transcription timings alignment. Defaults to True.
     diarize (bool): Whether to diarize the transcription. Defaults to False.
+    chunk_size (int): Chunk size in seconds for merging VAD segments. Defaults to 30.
 
 Returns:
     Transcription: The transcription of the audio file.
@@ -115,6 +116,7 @@ async def transcribe_audio(
     highlight_words: Annotated[bool, Form()] = False,
     align: Annotated[bool, Form()] = True,
     diarize: Annotated[bool, Form()] = False,
+    chunk_size: Annotated[int, Form()] = 30,
 ) -> Response:
     model, language, response_format = apply_defaults(config, model, language, response_format)
     timestamp_granularities = await get_timestamp_granularities(request)
@@ -130,10 +132,11 @@ async def transcribe_audio(
         timestamp_granularities: {timestamp_granularities}, \
         stream: {stream}, \
         hotwords: {hotwords}, \
-        suppress_numerals: {suppress_numerals} \
-        highlight_words: {highlight_words} \
+        suppress_numerals: {suppress_numerals}, \
+        highlight_words: {highlight_words}, \
         align: {align}, \
-        diarize: {diarize}")
+        diarize: {diarize}, \
+        chunk_size: {chunk_size}")
     
     if not align:
         if response_format in ('vtt', 'srt', 'aud', 'vtt_json'):
@@ -174,6 +177,7 @@ async def transcribe_audio(
             whispermodel=model_instance,
             align=align,
             diarize=diarize,
+            chunk_size=chunk_size,
             request_id=request_id
         )
     except Exception as e:
@@ -198,6 +202,7 @@ Args:
     prompt (str): The prompt to use for the translation.
     response_format (ResponseFormat): The response format to use for the translation. Defaults to "json".
     temperature (float): The temperature to use for the translation. Defaults to 0.0.
+    chunk_size (int): Chunk size in seconds for merging VAD segments. Defaults to 30.
 
 Returns:
     Translation: The translation of the audio file.
@@ -215,6 +220,7 @@ async def translate_audio(
     prompt: Annotated[str, Form()] = "",
     response_format: Annotated[ResponseFormat, Form()] = None,
     temperature: Annotated[float, Form()] = 0.0,
+    chunk_size: Annotated[int, Form()] = 30,
 ) -> Response:
     model, _, response_format = apply_defaults(config, model, language=None, response_format=response_format)
     request_id = request.state.request_id
@@ -224,7 +230,8 @@ async def translate_audio(
         model: {model}, \
         prompt: {prompt}, \
         response_format: {response_format}, \
-        temperature: {temperature}")
+        temperature: {temperature}, \
+        chunk_size: {chunk_size}")
     
     # Build ASR options
     asr_options = {
@@ -243,6 +250,7 @@ async def translate_audio(
             audio_file=file,
             asr_options=asr_options,
             whispermodel=model_instance,
+            chunk_size=chunk_size,
             request_id=request_id,
             task="translate"
         )

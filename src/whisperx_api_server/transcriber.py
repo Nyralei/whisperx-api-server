@@ -137,11 +137,12 @@ async def transcribe(
         except Exception:
             logger.error(f"Request ID: {request_id} - Could not remove temporary file: {file_path}")
         
-        if audio is not None:
+        if config.audio_cleanup and audio is not None:
             del audio
             logger.debug(f"Request ID: {request_id} - Audio data cleaned up")
         
-        cleanup_cache_only()
-        logger.debug(f"Request ID: {request_id} - Cache cleanup completed")
+        if config.cache_cleanup:
+            cleanup_cache_only()
+            logger.debug(f"Request ID: {request_id} - Cache cleanup completed")
 
     return result

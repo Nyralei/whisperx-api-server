@@ -208,3 +208,7 @@ class Config(BaseSettings):
     alignment: AlignConfig = AlignConfig()
 
     diarization: DiarizeConfig = DiarizeConfig()
+
+    cache_cleanup: bool = True
+
+    audio_cleanup: bool = True

@@ -1,6 +1,6 @@
-fastapi==0.115.8
-uvicorn==0.34.0
-pydantic==2.10.6
+fastapi>=0.120.4
+uvicorn>=0.38.0
+pydantic>=2.12.3
+pydantic-settings>=2.11.0
 whisperx @ git+https://github.com/m-bain/whisperX.git@429658d4ccefa55244bcdccd5d179795436093e4
-pydantic-settings==2.7.1
-python-multipart==0.0.20
+python-multipart>=0.0.20

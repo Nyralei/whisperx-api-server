@@ -7,24 +7,26 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    git \
     ffmpeg \
+    git \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 WORKDIR /workspace
 
 FROM base AS python-env
 
-RUN python3 -m venv venv
+RUN python3 -m venv /workspace/venv
 
 ENV PATH="/workspace/venv/bin:$PATH"
 
-COPY requirements-cpu.txt .
-COPY requirements.txt .
+COPY requirements-cpu.txt ./
 
 RUN pip install --upgrade pip && \
-    pip install -r requirements-cpu.txt \
-    && pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements-cpu.txt
+
+COPY requirements.txt constraints.txt ./
+
+RUN pip install --no-cache-dir -c constraints.txt -r requirements.txt
 
 FROM base AS runtime
 

@@ -8,6 +8,7 @@ from asyncio import Lock
 from typing import Union, List, Optional, Tuple, Any
 
 from whisperx import asr as whisperx_asr
+from whisperx import transcribe as whisperx_transcribe
 from whisperx import alignment as whisperx_alignment
 from whisperx import diarize as whisperx_diarize
 
@@ -26,6 +27,10 @@ diarize_model_instances = {}
 diarization_locks = defaultdict(Lock)
 
 alignment_cache_mod_lock = Lock()
+
+# Transcribe pipeline cache
+transcribe_pipeline_instances = {}
+transcribe_locks = defaultdict(Lock)
 
 def unload_model_object(model_obj: Any):
     if model_obj is None:
@@ -100,7 +105,7 @@ def _determine_inference_device():
     return inference_device
 
 
-async def initialize_model(model_name: str) -> CustomWhisperModel:
+def initialize_model(model_name: str) -> CustomWhisperModel:
     """
     Initializes a CustomWhisperModel with the config settings.
     """
@@ -150,14 +155,69 @@ async def _get_or_init_model(
 async def load_model_instance(model_name: str):
     """
     Async function to get the main Whisper model instance from cache, or initialize if needed.
-    (If you want to *unload* it later, you can create a similar function that pops it out of cache.)
     """
     return await _get_or_init_model(
         key=model_name,
         cache_dict=model_instances,
         lock_dict=model_locks,
-        init_func=lambda: initialize_model(model_name),
+        init_func=lambda: asyncio.to_thread(initialize_model, model_name),
     )
+
+# -------------------------------------------------------------------------
+# Transcribe pipeline loading
+# -------------------------------------------------------------------------
+def _hashable_vad_options(vad_options: Any) -> Any:
+    if vad_options is None:
+        return None
+    if isinstance(vad_options, dict):
+        return tuple(sorted((k, _hashable_vad_options(v)) for k, v in vad_options.items()))
+    if isinstance(vad_options, (list, tuple)):
+        return tuple(_hashable_vad_options(v) for v in vad_options)
+    return vad_options
+
+async def load_transcribe_pipeline_cached(
+    whispermodel: CustomWhisperModel,
+    language: Optional[str] = None,
+    task: str = "transcribe",
+):
+    config = get_config()
+    key = (
+        whispermodel.model_size_or_path,
+        whispermodel.device,
+        whispermodel.compute_type,
+        config.whisper.vad_method.value if hasattr(config.whisper.vad_method, "value") else config.whisper.vad_method,
+        config.whisper.vad_model,
+        _hashable_vad_options(config.whisper.vad_options),
+    )
+
+    def _init_pipeline():
+        return whisperx_transcribe.load_model(
+            whisper_arch=whispermodel.model_size_or_path,
+            device=whispermodel.device,
+            compute_type=whispermodel.compute_type,
+            language=language,
+            vad_model=config.whisper.vad_model,
+            vad_method=config.whisper.vad_method,
+            vad_options=config.whisper.vad_options,
+            task=task,
+        )
+
+    pipeline = await _get_or_init_model(
+        key=str(key),
+        cache_dict=transcribe_pipeline_instances,
+        lock_dict=transcribe_locks,
+        init_func=lambda: asyncio.to_thread(_init_pipeline),
+        log_reuse="Reusing cached transcribe pipeline: {key}",
+        log_init="Initializing transcribe pipeline: {key}",
+    )
+
+    if not config.whisper.cache:
+        removed = transcribe_pipeline_instances.pop(str(key), None)
+        if removed is not None:
+            logger.info(f"Unloading transcribe pipeline from cache (disabled): {key}")
+            unload_model_object(removed)
+
+    return pipeline
 
 # -------------------------------------------------------------------------
 # Alignment model loading
@@ -174,7 +234,7 @@ async def _cleanup_alignment_cache_whitelist():
         return
 
     async with alignment_cache_mod_lock:
-        for key in list(align_model_instances.keys()):
+        for key in align_model_instances.keys():
             if key not in whitelist:
                 logger.info(f"Unloading alignment model for {key} (not in whitelist).")
                 align_model_data = align_model_instances.pop(key, None)
@@ -269,7 +329,7 @@ async def load_diarize_model_cached(model_name: str):
     config = get_config()
     inference_device = _determine_inference_device()
 
-    async def _init_diarization():
+    def _init_diarization():
         logger.info(f"Loading diarization pipeline for model: {model_name} with device: {inference_device}")
         return whisperx_diarize.DiarizationPipeline(model_name=model_name, device=inference_device)
 
@@ -277,7 +337,7 @@ async def load_diarize_model_cached(model_name: str):
         key=model_name,
         cache_dict=diarize_model_instances,
         lock_dict=diarization_locks,
-        init_func=_init_diarization,
+        init_func=lambda: asyncio.to_thread(_init_diarization),
         log_reuse="Reusing cached diarization model for: {key}",
         log_init="Initializing diarization model: {key}",
     )

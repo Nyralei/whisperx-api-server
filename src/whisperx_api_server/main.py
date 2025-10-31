@@ -16,7 +16,8 @@ from whisperx_api_server.logger import setup_logger
 from whisperx_api_server.models import (
     load_model_instance,
     load_align_model_cached,
-    load_diarize_model_cached
+    load_diarize_model_cached,
+    load_transcribe_pipeline_cached,
 )
 
 from whisperx_api_server.routers.misc import (
@@ -46,15 +47,32 @@ async def lifespan(app: FastAPI):
 
     if config.whisper.preload_model is not None:
         logger.info(f"Loading model {config.whisper.preload_model}")
-        await load_model_instance(config.whisper.preload_model)
+        model_instance = await load_model_instance(config.whisper.preload_model)
+        try:
+            await load_transcribe_pipeline_cached(
+                whispermodel=model_instance,
+                language=getattr(config.default_language, "value", config.default_language),
+                task="transcribe",
+            )
+        except Exception:
+            logger.exception("Failed to preload transcribe pipeline; will build on first request")
+    try:
+        if config.alignment.preload_model is not None:
+            logger.info(f"Loading model {config.alignment.preload_model}")
+            await load_align_model_cached(config.alignment.preload_model)
+        elif config.alignment.whitelist:
+            for lang in config.alignment.whitelist:
+                logger.info(f"Loading model {lang}")
+                await load_align_model_cached(lang)
+    except Exception:
+        logger.exception("Failed to preload alignment model(s); will load on demand")
 
-    if config.alignment.preload_model is not None:
-        logger.info(f"Loading model {config.alignment.preload_model}")
-        await load_align_model_cached(config.alignment.preload_model)
-
-    if config.diarization.preload_model is not None:
-        logger.info(f"Loading model {config.diarization.preload_model}")
-        await load_diarize_model_cached(config.diarization.preload_model)
+    try:
+        if config.diarization.preload_model is not None:
+            logger.info(f"Loading model {config.diarization.preload_model}")
+            await load_diarize_model_cached(config.diarization.preload_model)
+    except Exception:
+        logger.exception("Failed to preload diarization model; will load on demand")
 
     yield
 

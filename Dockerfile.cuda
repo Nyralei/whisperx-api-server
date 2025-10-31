@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    ffmpeg \
     git \
+    libcudnn8 \
     python3 \
     python3-pip \
     python3-venv \
-    libcudnn8 \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 WORKDIR /workspace
@@ -26,12 +26,14 @@ RUN python3 -m venv /workspace/venv
 
 ENV PATH="/workspace/venv/bin:$PATH"
 
-COPY requirements-cuda.txt .
-COPY requirements.txt .
+COPY requirements-cuda.txt ./
 
 RUN pip install --upgrade pip && \
-    pip install -r requirements-cuda.txt \
-    && pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements-cuda.txt
+
+COPY requirements.txt constraints.txt ./
+
+RUN pip install --no-cache-dir -c constraints.txt -r requirements.txt
 
 FROM base AS runtime
 

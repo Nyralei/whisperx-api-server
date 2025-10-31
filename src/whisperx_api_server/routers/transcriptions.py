@@ -1,6 +1,5 @@
 import logging
 import uuid
-import functools
 from .models import handle_default_openai_model
 from fastapi import (
     APIRouter,
@@ -121,9 +120,9 @@ async def transcribe_audio(
     model, language, response_format = apply_defaults(config, model, language, response_format)
     timestamp_granularities = await get_timestamp_granularities(request)
     request_id = request.state.request_id
-    logger.debug(f"Request ID: {request_id} - Received transcription request")
+    logger.info(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()  # Start the timer
-    logger.debug(f"Request ID: {request_id} - Received request to transcribe {file.filename} with parameters: \
+    logger.info(f"Request ID: {request_id} - Received request to transcribe {file.filename} with parameters: \
         model: {model}, \
         language: {language}, \
         prompt: {prompt}, \
@@ -224,9 +223,9 @@ async def translate_audio(
 ) -> Response:
     model, _, response_format = apply_defaults(config, model, language=None, response_format=response_format)
     request_id = request.state.request_id
-    logger.debug(f"Request ID: {request_id} - Received translation request")
+    logger.info(f"Request ID: {request_id} - Received translation request")
     start_time = time.time()  # Start the timer
-    logger.debug(f"Request ID: {request_id} - Received request to translate {file.filename} with parameters: \
+    logger.info(f"Request ID: {request_id} - Received request to translate {file.filename} with parameters: \
         model: {model}, \
         prompt: {prompt}, \
         response_format: {response_format}, \

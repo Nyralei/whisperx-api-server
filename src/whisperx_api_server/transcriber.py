@@ -226,7 +226,7 @@ async def transcribe(
                 os.remove(file_path)
         if config.audio_cleanup and audio is not None:
             del audio
-            logger.debug(f"Request ID: {request_id} - Audio data cleaned up")
+            logger.info(f"Request ID: {request_id} - Audio data cleaned up")
         if config.cache_cleanup:
             _cleanup_cache_only()
-            logger.debug(f"Request ID: {request_id} - Cache cleanup completed")
+            logger.info(f"Request ID: {request_id} - Cache cleanup completed")

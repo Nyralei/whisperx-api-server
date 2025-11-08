@@ -1,0 +1,2 @@
+# Ensure shell scripts use LF endings in working tree to avoid /bin/bash\r issues in Linux containers
+*.sh text eol=lf

@@ -49,7 +49,9 @@ ENV UVICORN_HOST=0.0.0.0
 ENV UVICORN_PORT=8000
 
 COPY ./cuda-docker-entrypoint.sh /workspace/docker-entrypoint.sh
-RUN chmod +x /workspace/docker-entrypoint.sh
+# Ensure script has LF line endings and is executable (Windows checkouts may have CRLF)
+RUN sed -i 's/\r$//' /workspace/docker-entrypoint.sh \
+    && chmod +x /workspace/docker-entrypoint.sh
 
 ENTRYPOINT [ "/workspace/docker-entrypoint.sh" ]
 

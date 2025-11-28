@@ -234,7 +234,7 @@ async def _cleanup_alignment_cache_whitelist():
         return
 
     async with alignment_cache_mod_lock:
-        for key in align_model_instances.keys():
+        for key in list(align_model_instances.keys()): # noqa: S7504
             if key not in whitelist:
                 logger.info(f"Unloading alignment model for {key} (not in whitelist).")
                 align_model_data = align_model_instances.pop(key, None)

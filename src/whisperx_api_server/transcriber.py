@@ -126,7 +126,7 @@ async def _align_audio(result, audio, whispermodel, request_id):
         raise
 
 
-async def _diarize_audio(result, audio, request_id):
+async def _diarize_audio(result, audio, speaker_embeddings, request_id):
     loop = asyncio.get_running_loop()
     try:
         diarization_model_start = time.time()
@@ -136,10 +136,17 @@ async def _diarize_audio(result, audio, request_id):
 
         def _run_diarization():
             with torch.inference_mode():
-                return diarize_model(audio)
+                if speaker_embeddings:
+                    return diarize_model(audio=audio, return_embeddings=True)
+                else:
+                    return diarize_model(audio=audio), None
         diarize_start = time.time()
-        diarize_segments = await loop.run_in_executor(None, _run_diarization)
+        diarize_segments, embeddings = await loop.run_in_executor(None, _run_diarization)
         result["segments"] = whisperx_diarize.assign_word_speakers(diarize_segments, result["segments"])
+
+        if embeddings is not None:
+            result["embeddings"] = embeddings
+
         logger.info(f"Request ID: {request_id} - Diarization took {time.time() - diarize_start:.2f} seconds")
         return result
     except Exception as e:
@@ -163,6 +170,7 @@ async def transcribe(
     whispermodel: CustomWhisperModel = config.whisper.model,
     align: bool = False,
     diarize: bool = False,
+    speaker_embeddings: bool = False,
     request_id: str = "",
     task: str = "transcribe",
 ) -> whisperx_types.TranscriptionResult:
@@ -207,7 +215,7 @@ async def transcribe(
             result = await _align_audio(result, audio, whispermodel, request_id)
 
         if diarize:
-            result = await _diarize_audio(result, audio, request_id)
+            result = await _diarize_audio(result, audio, speaker_embeddings, request_id)
 
         result = _finalize_text(result, align or diarize)
 

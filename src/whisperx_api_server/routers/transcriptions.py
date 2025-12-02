@@ -115,6 +115,7 @@ async def transcribe_audio(
     highlight_words: Annotated[bool, Form()] = False,
     align: Annotated[bool, Form()] = True,
     diarize: Annotated[bool, Form()] = False,
+    speaker_embeddings: Annotated[bool, Form()] = False,
     chunk_size: Annotated[int, Form()] = 30,
 ) -> Response:
     model, language, response_format = apply_defaults(config, model, language, response_format)
@@ -135,6 +136,7 @@ async def transcribe_audio(
         highlight_words: {highlight_words}, \
         align: {align}, \
         diarize: {diarize}, \
+        speaker_embeddings: {speaker_embeddings}, \
         chunk_size: {chunk_size}")
     
     if not align:
@@ -176,6 +178,7 @@ async def transcribe_audio(
             whispermodel=model_instance,
             align=align,
             diarize=diarize,
+            speaker_embeddings=speaker_embeddings,
             chunk_size=chunk_size,
             request_id=request_id
         )

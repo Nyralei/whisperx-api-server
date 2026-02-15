@@ -1,3 +1,4 @@
-torch~=2.6.0
-torchaudio~=2.6.0
+torch~=2.8.0
+torchaudio~=2.8.0
+torchcodec~=0.7.0
 onnxruntime~=1.21.0

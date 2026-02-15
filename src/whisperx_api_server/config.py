@@ -11,12 +11,14 @@ class ResponseFormat(str, Enum):
     VTT_JSON = "vtt_json"
     SRT = "srt"
     VTT = "vtt"
-    AUD = "aud" # Audacity
+    AUD = "aud"  # Audacity
+
 
 class MediaType(str, Enum):
     APPLICATION_JSON = "application/json"
     TEXT_PLAIN = "text/plain"
     TEXT_VTT = "text/vtt"
+
 
 class Language(str, Enum):
     AF = "af"
@@ -121,6 +123,8 @@ class Language(str, Enum):
     ZH = "zh"
 
 # https://github.com/OpenNMT/CTranslate2/blob/master/docs/quantization.md
+
+
 class Quantization(str, Enum):
     INT8 = "int8"
     INT8_FLOAT16 = "int8_float16"
@@ -138,9 +142,11 @@ class Device(str, Enum):
     CUDA = "cuda"
     AUTO = "auto"
 
+
 class VadMethod(str, Enum):
     SILERO = "silero"
     PYANNOTE = "pyannote"
+
 
 class WhisperConfig(BaseModel):
     """See https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/transcribe.py#L599."""
@@ -162,19 +168,24 @@ class WhisperConfig(BaseModel):
     vad_model: str = Field(default=None)
     vad_options: dict = Field(default=None)
     cache: bool = Field(default=True)
-    preload_model: str = Field(default=None)
+    preload_model: bool = Field(default=False)
     local_files_only: bool = Field(default=False)
     download_root: str = Field(default=None)
+
 
 class AlignConfig(BaseModel):
     models: dict = Field(default_factory=dict)
     whitelist: list = Field(default_factory=list)
     cache: bool = Field(default=True)
-    preload_model: str = Field(default=None)
+    preload_model: bool = Field(default=False)
+    preload_model_name: str = Field(default=None)
+
 
 class DiarizeConfig(BaseModel):
+    model: str = Field(default="pyannote/speaker-diarization-community-1")
     cache: bool = Field(default=True)
-    preload_model: str = Field(default=None)
+    preload_model: bool = Field(default=False)
+
 
 class Config(BaseSettings):
     """
@@ -203,6 +214,8 @@ class Config(BaseSettings):
 
     batch_size: int = 12
 
+    chunk_size: int = 30
+
     whisper: WhisperConfig = WhisperConfig()
 
     alignment: AlignConfig = AlignConfig()
@@ -212,3 +225,5 @@ class Config(BaseSettings):
     cache_cleanup: bool = True
 
     audio_cleanup: bool = True
+
+    hf_token: str = Field(alias="HF_TOKEN", default=None)

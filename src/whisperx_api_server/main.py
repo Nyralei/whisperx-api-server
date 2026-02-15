@@ -1,6 +1,5 @@
 import logging
 import uuid
-import asyncio
 from fastapi import (
     FastAPI,
     Request
@@ -10,14 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from whisperx_api_server.dependencies import ApiKeyDependency, get_config
-
 from whisperx_api_server.logger import setup_logger
 
 from whisperx_api_server.models import (
-    load_model_instance,
-    load_align_model_cached,
-    load_diarize_model_cached,
-    load_transcribe_pipeline_cached,
+    load_transcribe_pipeline,
+    load_align_model,
+    load_diarize_pipeline,
 )
 
 from whisperx_api_server.routers.misc import (
@@ -32,6 +29,7 @@ from whisperx_api_server.routers.transcriptions import (
     router as transcribe_router,
 )
 
+
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
@@ -40,41 +38,45 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
         return response
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config = get_config()
     logger = logging.getLogger(__name__)
-
-    if config.whisper.preload_model is not None:
-        logger.info(f"Loading model {config.whisper.preload_model}")
-        model_instance = await load_model_instance(config.whisper.preload_model)
+    if config.whisper.preload_model:
+        logger.info(f"Preloading model {config.whisper.model}")
         try:
-            await load_transcribe_pipeline_cached(
-                whispermodel=model_instance,
-                language=getattr(config.default_language, "value", config.default_language),
-                task="transcribe",
+            await load_transcribe_pipeline(
+                model_name=config.whisper.model,
             )
         except Exception:
-            logger.exception("Failed to preload transcribe pipeline; will build on first request")
+            logger.exception(
+                "Failed to preload model; will load on demand")
     try:
-        if config.alignment.preload_model is not None:
-            logger.info(f"Loading model {config.alignment.preload_model}")
-            await load_align_model_cached(config.alignment.preload_model)
-        elif config.alignment.whitelist:
-            for lang in config.alignment.whitelist:
-                logger.info(f"Loading model {lang}")
-                await load_align_model_cached(lang)
-    except Exception:
-        logger.exception("Failed to preload alignment model(s); will load on demand")
+        if config.alignment.preload_model:
+            if config.alignment.preload_model_name:
+                logger.info(
+                    f"Preloading alignment model for: {config.alignment.preload_model_name}")
+                await load_align_model(config.alignment.preload_model_name)
 
-    try:
-        if config.diarization.preload_model is not None:
-            logger.info(f"Loading model {config.diarization.preload_model}")
-            await load_diarize_model_cached(config.diarization.preload_model)
+            elif config.alignment.whitelist:
+                for lang in config.alignment.whitelist:
+                    logger.info(f"Preloading alignment model for: {lang}")
+                    await load_align_model(lang)
     except Exception:
-        logger.exception("Failed to preload diarization model; will load on demand")
+        logger.exception(
+            "Failed to preload alignment model(s); will load on demand")
+    try:
+        if config.diarization.preload_model:
+            logger.info(
+                f"Preloading diarization model {config.diarization.model}")
+            await load_diarize_pipeline(model_name=config.diarization.model)
+    except Exception:
+        logger.exception(
+            "Failed to preload diarization model; will load on demand")
 
     yield
+
 
 def create_app() -> FastAPI:
     config = get_config()
@@ -91,7 +93,7 @@ def create_app() -> FastAPI:
 
     # Misc router is for not protected endpoints like healthcheck
     app.include_router(misc_router)
-    
+
     app.include_router(models_router, dependencies=dependencies)
     app.include_router(transcribe_router, dependencies=dependencies)
 
@@ -103,7 +105,7 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-    
+
     app.add_middleware(RequestIDMiddleware)
 
     return app

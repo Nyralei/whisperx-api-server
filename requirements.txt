@@ -2,5 +2,5 @@ fastapi>=0.120.4
 uvicorn>=0.38.0
 pydantic>=2.12.3
 pydantic-settings>=2.11.0
-whisperx @ git+https://github.com/m-bain/whisperX.git@429658d4ccefa55244bcdccd5d179795436093e4
+whisperx @ git+https://github.com/m-bain/whisperX.git@v3.8.1
 python-multipart>=0.0.20

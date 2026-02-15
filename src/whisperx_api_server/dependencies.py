@@ -11,15 +11,18 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from whisperx_api_server.config import Config
 
+
 @lru_cache
 def get_config() -> Config:
     return Config()
+
 
 ConfigDependency = Annotated[Config, Depends(get_config)]
 
 security = HTTPBearer()
 
 logger = logging.getLogger(__name__)
+
 
 async def verify_api_key(
     config: ConfigDependency, credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)]
@@ -39,7 +42,8 @@ async def verify_api_key(
     client_name = api_keys.get(credentials.credentials)
 
     if credentials.credentials != config.api_key and client_name is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
 
     if client_name:
         logger.info(f"Authorized request from client: '{client_name}'")

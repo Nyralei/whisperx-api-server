@@ -16,7 +16,6 @@ from whisperx import audio as whisperx_audio
 from whisperx import alignment as whisperx_alignment
 from whisperx import diarize as whisperx_diarize
 from whisperx import schema as whisperx_schema
-from faster_whisper.transcribe import TranscriptionOptions
 
 from whisperx_api_server.config import (
     Language,
@@ -77,7 +76,7 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
     return file_path
 
 
-async def _load_audio(file_path: str, request_id: str):
+async def _load_audio(file_path: str, request_id: str) -> np.ndarray:
     loop = asyncio.get_running_loop()
     try:
         audio = await loop.run_in_executor(None, whisperx_audio.load_audio, file_path)
@@ -111,7 +110,7 @@ def _apply_request_options(model: whisperx_asr.FasterWhisperPipeline, asr_option
 
 async def _transcribe_audio(
     model: whisperx_asr.FasterWhisperPipeline,
-    audio: str,
+    audio: np.ndarray,
     batch_size: int,
     chunk_size: int,
     language: Language,
@@ -211,7 +210,7 @@ async def _diarize_audio(result: whisperx_schema.TranscriptionResult, audio: np.
         raise
 
 
-def _finalize_text(result, align_or_diarize: bool):
+def _finalize_text(result: whisperx_schema.TranscriptionResult, align_or_diarize: bool) -> whisperx_schema.TranscriptionResult:
     segments = result.get("segments", [])
     if align_or_diarize and isinstance(segments, dict):
         segments = segments.get("segments", [])
@@ -223,8 +222,8 @@ def _finalize_text(result, align_or_diarize: bool):
 
 async def transcribe(
     audio_file: UploadFile,
-    batch_size: int = config.batch_size,
-    chunk_size: int = config.chunk_size,
+    batch_size: int = config.whisper.batch_size,
+    chunk_size: int = config.whisper.chunk_size,
     asr_options: dict = {},
     language: Language = config.default_language,
     model_name: str = config.whisper.model,

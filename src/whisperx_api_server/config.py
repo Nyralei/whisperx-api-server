@@ -149,9 +149,6 @@ class VadMethod(str, Enum):
 
 
 class WhisperConfig(BaseModel):
-    """See https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/transcribe.py#L599."""
-
-    model: str = Field(default="large-v3")
     """
     Default Huggingface model to use for transcription. Note, the model must support being ran using CTranslate2.
     This model will be used if no model is specified in the request.
@@ -159,6 +156,7 @@ class WhisperConfig(BaseModel):
     Models created by authors of `faster-whisper` can be found at https://huggingface.co/Systran
     You can find other supported models at https://huggingface.co/models?p=2&sort=trending&search=ctranslate2 and https://huggingface.co/models?sort=trending&search=ct2
     """
+    model: str = Field(default="large-v3")
     inference_device: Device = Field(default=Device.AUTO)
     device_index: int | list[int] = Field(default=0)
     compute_type: Quantization = Field(default=Quantization.DEFAULT)
@@ -171,6 +169,8 @@ class WhisperConfig(BaseModel):
     preload_model: bool = Field(default=False)
     local_files_only: bool = Field(default=False)
     download_root: str = Field(default=None)
+    batch_size: int = Field(default=12)
+    chunk_size: int = Field(default=30)
 
 
 class AlignConfig(BaseModel):
@@ -211,10 +211,6 @@ class Config(BaseSettings):
     default_language: Language | None = None
 
     default_response_format: ResponseFormat = ResponseFormat.JSON
-
-    batch_size: int = 12
-
-    chunk_size: int = 30
 
     whisper: WhisperConfig = WhisperConfig()
 

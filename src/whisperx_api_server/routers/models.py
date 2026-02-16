@@ -4,7 +4,6 @@ from fastapi.responses import JSONResponse
 from typing import Annotated
 from pydantic import AfterValidator
 
-import whisperx_api_server.transcriber as transcriber
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.config import (
     Language,
@@ -56,6 +55,7 @@ def list_models_endpoint():
     tags=["models", "transcribe"],
 )
 def unload_model_endpoint(model: Annotated[ModelName, Form()]):
+    logging.info(f"Received request to unload model {model}")
     try:
         to_remove = [k for k in transcribe_pipeline_instances if k[0] == model]
         for k in to_remove:
@@ -75,8 +75,11 @@ def unload_model_endpoint(model: Annotated[ModelName, Form()]):
     tags=["models", "transcribe"],
 )
 async def load_model(model: Annotated[ModelName, Form()]):
+    logging.info(f"Received request to load model {model}")
+    if any(key[0] == model for key in transcribe_pipeline_instances):
+        return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     try:
-        await load_transcribe_pipeline(model_name=model, language=None, task="transcribe")
+        await load_transcribe_pipeline(model_name=model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
@@ -97,6 +100,7 @@ def list_align_models_endpoint():
     tags=["models", "align"],
 )
 def unload_align_model_endpoint(language: Annotated[Language, Form()]):
+    logging.info(f"Received request to unload align model {language}")
     try:
         if language in align_model_instances:
             align_model_data = align_model_instances.pop(language, None)
@@ -118,6 +122,9 @@ def unload_align_model_endpoint(language: Annotated[Language, Form()]):
     tags=["models", "align"],
 )
 async def load_alignment_endpoint(language: Annotated[Language, Form()]):
+    logging.info(f"Received request to load align model {language}")
+    if language in align_model_instances:
+        return JSONResponse(content={"status": "success", "model": language}, media_type=MediaType.APPLICATION_JSON)
     try:
         await load_align_model(language)
         return JSONResponse(content={"status": "success", "model": language}, media_type=MediaType.APPLICATION_JSON)
@@ -140,6 +147,7 @@ def list_diarize_models_endpoint():
     tags=["models", "diarize"],
 )
 def unload_diarize_model(model: Annotated[ModelName, Form()]):
+    logging.info(f"Received request to unload diarize model {model}")
     try:
         if model in diarize_pipeline_instances:
             diarize_model_data = diarize_pipeline_instances.pop(model, None)
@@ -160,8 +168,10 @@ def unload_diarize_model(model: Annotated[ModelName, Form()]):
     tags=["models", "diarize"],
 )
 async def load_diarization_endpoint(model: Annotated[ModelName, Form()]):
+    logging.info(f"Received request to load diarize model {model}")
+    if model in diarize_pipeline_instances:
+        return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     try:
-        config = get_config()
         await load_diarize_pipeline(model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:

@@ -83,6 +83,7 @@ async def _get_or_init_model(
         if key in cache_dict:
             return cache_dict[key]
         try:
+            logger.info(log_init.format(key=key))
             instance = await init_func()
         except Exception as e:
             logger.error(f"Failed to initialize model {key}: {e}")

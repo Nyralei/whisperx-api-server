@@ -17,7 +17,7 @@ import time
 
 
 import whisperx_api_server.transcriber as transcriber
-from whisperx_api_server.dependencies import ConfigDependency
+from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.config import (
     Language,
@@ -25,6 +25,8 @@ from whisperx_api_server.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+config = get_config()
 
 router = APIRouter()
 
@@ -58,17 +60,6 @@ async def get_timestamp_granularities(request: Request) -> list[Literal["segment
     )
     return timestamp_granularities
 
-
-def apply_defaults(config, model, language=None, response_format=None):
-    if model is None:
-        model = config.whisper.model
-    if language is None:
-        language = config.default_language
-    if response_format is None:
-        response_format = config.default_response_format
-    return model, language, response_format
-
-
 """
 OpenAI-like endpoint to transcribe audio files using the Whisper ASR model.
 
@@ -100,13 +91,13 @@ Returns:
     tags=["Transcription"],
 )
 async def transcribe_audio(
-    config: ConfigDependency,
     request: Request,
     file: UploadFile,
-    model: Annotated[ModelName, Form()] = None,
-    language: Annotated[Language, Form()] = None,
+    model: Annotated[ModelName, Form()] = config.whisper.model,
+    language: Annotated[Language, Form()] = config.default_language,
     prompt: Annotated[str, Form()] = None,
-    response_format: Annotated[ResponseFormat, Form()] = None,
+    response_format: Annotated[ResponseFormat,
+                               Form()] = config.default_response_format,
     temperature: Annotated[float, Form()] = 0.0,
     timestamp_granularities: Annotated[
         list[Literal["segment", "word"]],
@@ -119,14 +110,12 @@ async def transcribe_audio(
     align: Annotated[bool, Form()] = True,
     diarize: Annotated[bool, Form()] = False,
     speaker_embeddings: Annotated[bool, Form()] = False,
-    chunk_size: Annotated[int, Form()] = 30,
+    chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
 ) -> Response:
-    model, language, response_format = apply_defaults(
-        config, model, language, response_format)
     timestamp_granularities = await get_timestamp_granularities(request)
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received transcription request")
-    start_time = time.time()  # Start the timer
+    start_time = time.time()
     logger.info(f"Request ID: {request_id} - Received request to transcribe {file.filename} with parameters: \
         model: {model}, \
         language: {language}, \
@@ -156,10 +145,8 @@ async def transcribe_audio(
                 detail="Diarization requires alignment to be enabled."
             )
 
-    # Determine if word timestamps are required
     word_timestamps = "word" in timestamp_granularities
 
-    # Build ASR options
     asr_options = {
         "suppress_numerals": suppress_numerals,
         "temperatures": temperature,
@@ -222,20 +209,18 @@ Returns:
     tags=["Translation"],
 )
 async def translate_audio(
-    config: ConfigDependency,
     request: Request,
     file: UploadFile,
-    model: Annotated[ModelName, Form()] = None,
+    model: Annotated[ModelName, Form()] = config.whisper.model,
     prompt: Annotated[str, Form()] = "",
-    response_format: Annotated[ResponseFormat, Form()] = None,
+    response_format: Annotated[ResponseFormat,
+                               Form()] = config.default_response_format,
     temperature: Annotated[float, Form()] = 0.0,
-    chunk_size: Annotated[int, Form()] = 30,
+    chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
 ) -> Response:
-    model, _, response_format = apply_defaults(
-        config, model, language=None, response_format=response_format)
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received translation request")
-    start_time = time.time()  # Start the timer
+    start_time = time.time()
     logger.info(f"Request ID: {request_id} - Received request to translate {file.filename} with parameters: \
         model: {model}, \
         prompt: {prompt}, \
@@ -243,7 +228,6 @@ async def translate_audio(
         temperature: {temperature}, \
         chunk_size: {chunk_size}")
 
-    # Build ASR options
     asr_options = {
         "initial_prompt": prompt,
         "temperatures": temperature,

@@ -1,14 +1,19 @@
-ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION=3.12
 
-FROM python:${PYTHON_VERSION}-slim-bookworm AS base
+FROM python:${PYTHON_VERSION}-slim-trixie AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
     curl \
     ffmpeg \
     git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 WORKDIR /workspace

@@ -222,4 +222,4 @@ class Config(BaseSettings):
 
     audio_cleanup: bool = True
 
-    hf_token: str = Field(alias="HF_TOKEN", default=None)
+    hf_token: str = Field(alias="HF_TOKEN", default="")

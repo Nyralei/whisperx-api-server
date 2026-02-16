@@ -11,12 +11,14 @@ class ResponseFormat(str, Enum):
     VTT_JSON = "vtt_json"
     SRT = "srt"
     VTT = "vtt"
-    AUD = "aud" # Audacity
+    AUD = "aud"  # Audacity
+
 
 class MediaType(str, Enum):
     APPLICATION_JSON = "application/json"
     TEXT_PLAIN = "text/plain"
     TEXT_VTT = "text/vtt"
+
 
 class Language(str, Enum):
     AF = "af"
@@ -121,6 +123,8 @@ class Language(str, Enum):
     ZH = "zh"
 
 # https://github.com/OpenNMT/CTranslate2/blob/master/docs/quantization.md
+
+
 class Quantization(str, Enum):
     INT8 = "int8"
     INT8_FLOAT16 = "int8_float16"
@@ -138,14 +142,13 @@ class Device(str, Enum):
     CUDA = "cuda"
     AUTO = "auto"
 
+
 class VadMethod(str, Enum):
     SILERO = "silero"
     PYANNOTE = "pyannote"
 
-class WhisperConfig(BaseModel):
-    """See https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/transcribe.py#L599."""
 
-    model: str = Field(default="large-v3")
+class WhisperConfig(BaseModel):
     """
     Default Huggingface model to use for transcription. Note, the model must support being ran using CTranslate2.
     This model will be used if no model is specified in the request.
@@ -153,6 +156,7 @@ class WhisperConfig(BaseModel):
     Models created by authors of `faster-whisper` can be found at https://huggingface.co/Systran
     You can find other supported models at https://huggingface.co/models?p=2&sort=trending&search=ctranslate2 and https://huggingface.co/models?sort=trending&search=ct2
     """
+    model: str = Field(default="large-v3")
     inference_device: Device = Field(default=Device.AUTO)
     device_index: int | list[int] = Field(default=0)
     compute_type: Quantization = Field(default=Quantization.DEFAULT)
@@ -162,19 +166,26 @@ class WhisperConfig(BaseModel):
     vad_model: str = Field(default=None)
     vad_options: dict = Field(default=None)
     cache: bool = Field(default=True)
-    preload_model: str = Field(default=None)
+    preload_model: bool = Field(default=False)
     local_files_only: bool = Field(default=False)
     download_root: str = Field(default=None)
+    batch_size: int = Field(default=12)
+    chunk_size: int = Field(default=30)
+
 
 class AlignConfig(BaseModel):
     models: dict = Field(default_factory=dict)
     whitelist: list = Field(default_factory=list)
     cache: bool = Field(default=True)
-    preload_model: str = Field(default=None)
+    preload_model: bool = Field(default=False)
+    preload_model_name: str = Field(default=None)
+
 
 class DiarizeConfig(BaseModel):
+    model: str = Field(default="pyannote/speaker-diarization-community-1")
     cache: bool = Field(default=True)
-    preload_model: str = Field(default=None)
+    preload_model: bool = Field(default=False)
+
 
 class Config(BaseSettings):
     """
@@ -201,8 +212,6 @@ class Config(BaseSettings):
 
     default_response_format: ResponseFormat = ResponseFormat.JSON
 
-    batch_size: int = 12
-
     whisper: WhisperConfig = WhisperConfig()
 
     alignment: AlignConfig = AlignConfig()
@@ -212,3 +221,5 @@ class Config(BaseSettings):
     cache_cleanup: bool = True
 
     audio_cleanup: bool = True
+
+    hf_token: str = Field(alias="HF_TOKEN", default="")

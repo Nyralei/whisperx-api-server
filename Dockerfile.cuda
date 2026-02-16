@@ -1,6 +1,6 @@
-ARG UBUNTU_VERSION=22.04
-ARG CUDA_VERSION=12.4.1
-ARG BASE_CUDA_RUN_CONTAINER=nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+ARG UBUNTU_VERSION=24.04
+ARG CUDA_VERSION=12.8.1
+ARG BASE_CUDA_RUN_CONTAINER=nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION}
 
 FROM ${BASE_CUDA_RUN_CONTAINER} AS base
 
@@ -12,10 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     git \
-    libcudnn8 \
     python3 \
     python3-pip \
     python3-venv \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 WORKDIR /workspace

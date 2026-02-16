@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 @router.get(
     "/healthcheck",
     description="Check the health of the API server",

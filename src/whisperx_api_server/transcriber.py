@@ -285,10 +285,7 @@ async def _diarize_audio(result: whisperx_schema.TranscriptionResult, audio: np.
         diarize_start = time.time()
         diarize_segments, embeddings = await loop.run_in_executor(None, _run_diarization)
         result["segments"] = whisperx_diarize.assign_word_speakers(
-            diarize_segments, result["segments"])
-
-        if embeddings is not None:
-            result["embeddings"] = embeddings
+            diarize_segments, result["segments"], embeddings)
 
         logger.info(
             f"Request ID: {request_id} - Diarization took {time.time() - diarize_start:.2f} seconds")

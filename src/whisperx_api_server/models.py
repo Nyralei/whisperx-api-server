@@ -205,7 +205,8 @@ async def load_align_model(
                 language_code=language_code,
                 device=inference_device,
                 model_name=selected_model_name,
-                model_dir=model_dir
+                model_dir=model_dir,
+                model_cache_only=config.alignment.local_files_only,
             )
         )
 

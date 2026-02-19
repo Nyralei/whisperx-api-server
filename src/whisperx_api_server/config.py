@@ -179,6 +179,7 @@ class AlignConfig(BaseModel):
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
     preload_model_name: str = Field(default=None)
+    local_files_only: bool = Field(default=False)
 
 
 class DiarizeConfig(BaseModel):

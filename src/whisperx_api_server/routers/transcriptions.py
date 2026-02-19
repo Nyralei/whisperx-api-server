@@ -60,6 +60,7 @@ def get_timestamp_granularities(
     )
     return timestamp_granularities
 
+
 """
 OpenAI-like endpoint to transcribe audio files using the Whisper ASR model.
 
@@ -111,8 +112,10 @@ async def transcribe_audio(
     diarize: Annotated[bool, Form()] = False,
     speaker_embeddings: Annotated[bool, Form()] = False,
     chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
+    batch_size: Annotated[int, Form()] = config.whisper.batch_size
 ) -> Response:
-    timestamp_granularities = get_timestamp_granularities(timestamp_granularities)
+    timestamp_granularities = get_timestamp_granularities(
+        timestamp_granularities)
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()
@@ -130,7 +133,8 @@ async def transcribe_audio(
         align: {align}, \
         diarize: {diarize}, \
         speaker_embeddings: {speaker_embeddings}, \
-        chunk_size: {chunk_size}")
+        chunk_size: {chunk_size}, \
+        batch_size: {batch_size}")
 
     if not align:
         if response_format in ('vtt', 'srt', 'aud', 'vtt_json'):
@@ -158,6 +162,7 @@ async def transcribe_audio(
     try:
         transcription = await transcriber.transcribe(
             audio_file=file,
+            batch_size=batch_size,
             asr_options=asr_options,
             language=language,
             model_name=model,
@@ -212,6 +217,7 @@ async def translate_audio(
                                Form()] = config.default_response_format,
     temperature: Annotated[float, Form()] = 0.0,
     chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
+    batch_size: Annotated[int, Form()] = config.whisper.batch_size
 ) -> Response:
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received translation request")
@@ -221,7 +227,8 @@ async def translate_audio(
         prompt: {prompt}, \
         response_format: {response_format}, \
         temperature: {temperature}, \
-        chunk_size: {chunk_size}")
+        chunk_size: {chunk_size}, \
+        batch_size: {batch_size}")
 
     asr_options = {
         "initial_prompt": prompt,
@@ -231,6 +238,7 @@ async def translate_audio(
     try:
         translation = await transcriber.transcribe(
             audio_file=file,
+            batch_size=batch_size,
             asr_options=asr_options,
             model_name=model,
             chunk_size=chunk_size,

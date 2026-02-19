@@ -43,7 +43,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-async def get_timestamp_granularities(request: Request) -> list[Literal["segment", "word"]]:
+def get_timestamp_granularities(
+    timestamp_granularities: list[Literal["segment", "word"]] | None,
+) -> list[Literal["segment", "word"]]:
     TIMESTAMP_GRANULARITIES_COMBINATIONS = [
         [],
         ["segment"],
@@ -51,10 +53,8 @@ async def get_timestamp_granularities(request: Request) -> list[Literal["segment
         ["word", "segment"],
         ["segment", "word"],
     ]
-    form = await request.form()
-    if form.get("timestamp_granularities[]") is None:
+    if timestamp_granularities is None:
         return ["segment"]
-    timestamp_granularities = form.getlist("timestamp_granularities[]")
     assert timestamp_granularities in TIMESTAMP_GRANULARITIES_COMBINATIONS, (
         f"{timestamp_granularities} is not a valid value for `timestamp_granularities[]`."
     )
@@ -112,7 +112,7 @@ async def transcribe_audio(
     speaker_embeddings: Annotated[bool, Form()] = False,
     chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
 ) -> Response:
-    timestamp_granularities = await get_timestamp_granularities(request)
+    timestamp_granularities = get_timestamp_granularities(timestamp_granularities)
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()
@@ -154,11 +154,6 @@ async def transcribe_audio(
         "initial_prompt": prompt,
         "hotwords": hotwords,
     }
-
-    model_load_time = time.time()
-
-    logger.info(
-        f"Loaded model {model} in {time.time() - model_load_time:.2f} seconds")
 
     try:
         transcription = await transcriber.transcribe(
@@ -232,11 +227,6 @@ async def translate_audio(
         "initial_prompt": prompt,
         "temperatures": temperature,
     }
-
-    model_load_time = time.time()
-
-    logger.info(
-        f"Loaded model {model} in {time.time() - model_load_time:.2f} seconds")
 
     try:
         translation = await transcriber.transcribe(

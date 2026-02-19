@@ -39,6 +39,13 @@ _concurrency_semaphore = None
 _io_executor: ThreadPoolExecutor | None = None
 _UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 _UPLOAD_WRITE_BUFFER_SIZE = 1024 * 1024  # 1 MiB
+_DEFAULT_ASR_OPTIONS = {
+    "suppress_numerals": True,
+    "temperatures": 0.0,
+    "word_timestamps": False,
+    "initial_prompt": None,
+    "hotwords": None,
+}
 
 
 def _get_concurrency_semaphore() -> asyncio.Semaphore | None:
@@ -69,67 +76,47 @@ def _get_io_executor() -> ThreadPoolExecutor:
 
 async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
     """Stream upload to temp file in chunks"""
-    upload_start = time.perf_counter()
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{audio_file.filename}") as tmp:
         file_path = tmp.name
 
     chunk_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=2)
     write_error: list[BaseException] = []
-    chunks_written: list[int] = []
 
     def _writer() -> None:
         try:
             with open(file_path, "wb", buffering=_UPLOAD_WRITE_BUFFER_SIZE) as f:
-                chunk_idx = 0
                 while True:
                     chunk = chunk_queue.get()
                     if chunk is None:
                         break
                     f.write(chunk)
-                    chunks_written.append(len(chunk))
-                    logger.debug(
-                        f"Request ID: {request_id} - writer saved chunk {chunk_idx} "
-                        f"size={len(chunk)} bytes, total_so_far={sum(chunks_written)}")
-                    chunk_idx += 1
-                logger.debug(
-                    f"Request ID: {request_id} - writer finished: {chunk_idx} chunks, "
-                    f"total={sum(chunks_written)} bytes")
         except BaseException as e:
             write_error.append(e)
 
     writer_thread = threading.Thread(target=_writer, daemon=True)
     writer_thread.start()
-    logger.debug(
-        f"Request ID: {request_id} - upload stream started, chunk_size={_UPLOAD_STREAM_CHUNK_SIZE}, "
-        f"target={file_path}")
 
     try:
-        chunk_idx = 0
-        total_read = 0
         while True:
-            read_start = time.perf_counter()
             chunk = await audio_file.read(_UPLOAD_STREAM_CHUNK_SIZE)
-            read_elapsed = time.perf_counter() - read_start
             if len(chunk) == 0:
                 break
-            total_read += len(chunk)
-            logger.debug(
-                f"Request ID: {request_id} - read chunk {chunk_idx} size={len(chunk)} bytes "
-                f"(read_ms={read_elapsed*1000:.1f}, total_read={total_read})")
-            chunk_queue.put(chunk)
-            chunk_idx += 1
+            try:
+                chunk_queue.put_nowait(chunk)
+            except queue.Full:
+                await asyncio.to_thread(chunk_queue.put, chunk)
             if len(chunk) < _UPLOAD_STREAM_CHUNK_SIZE:
                 break
-        chunk_queue.put(None)
-        upload_elapsed = time.perf_counter() - upload_start
-        logger.debug(
-            f"Request ID: {request_id} - upload stream done: {chunk_idx} chunks, {total_read} bytes "
-            f"in {upload_elapsed:.3f}s (~{total_read / (1024 * 1024) / upload_elapsed:.2f} MiB/s)")
+        try:
+            chunk_queue.put_nowait(None)
+        except queue.Full:
+            await asyncio.to_thread(chunk_queue.put, None)
     except Exception as e:
         logger.error(
             f"Request ID: {request_id} - Failed to read uploaded file: {e}")
-        chunk_queue.put(None)
-        writer_thread.join()
+        with contextlib.suppress(queue.Full):
+            chunk_queue.put_nowait(None)
+        await asyncio.to_thread(writer_thread.join, 5)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -137,7 +124,7 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
                 pass
         raise
     finally:
-        writer_thread.join(timeout=30)
+        await asyncio.to_thread(writer_thread.join, 30)
 
     if write_error:
         if os.path.exists(file_path):
@@ -149,27 +136,16 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
             f"Request ID: {request_id} - Failed to write temp file: {write_error[0]}")
         raise write_error[0]
 
-    if logger.isEnabledFor(logging.DEBUG) and os.path.exists(file_path):
-        logger.debug(
-            f"Request ID: {request_id} - temp file ready size={os.path.getsize(file_path)} bytes")
     return file_path
 
 
 async def _load_audio(file_path: str, request_id: str) -> np.ndarray:
     loop = asyncio.get_running_loop()
     executor = _get_io_executor()
-    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-    logger.debug(
-        f"Request ID: {request_id} - load_audio starting path={file_path} file_size={file_size}")
-    load_start = time.perf_counter()
     try:
         audio = await loop.run_in_executor(executor, whisperx_audio.load_audio, file_path)
-        load_elapsed = time.perf_counter() - load_start
         logger.info(
             f"Request ID: {request_id} - Audio loaded from {file_path}")
-        logger.debug(
-            f"Request ID: {request_id} - load_audio done shape={audio.shape} dtype={audio.dtype} "
-            f"duration_s={load_elapsed:.3f} (~{file_size / (1024 * 1024) / load_elapsed:.2f} MiB/s decode)")
         return audio
     except Exception as e:
         logger.error(f"Request ID: {request_id} - Failed to load audio: {e}")
@@ -178,22 +154,25 @@ async def _load_audio(file_path: str, request_id: str) -> np.ndarray:
 
 def _apply_request_options(model: whisperx_asr.FasterWhisperPipeline, asr_options: dict | None) -> None:
     """Apply per-request asr_options to the pipeline so each request can set language, hotwords, etc."""
-    opts = asr_options or {}
-    overrides = {}
-    if opts.get("temperatures") is not None:
-        t = opts["temperatures"]
-        overrides["temperatures"] = [t] if not isinstance(
-            t, (list, tuple)) else list(t)
-    if opts.get("word_timestamps") is not None:
-        overrides["word_timestamps"] = opts["word_timestamps"]
-    if opts.get("initial_prompt") is not None:
-        overrides["initial_prompt"] = opts["initial_prompt"]
-    if opts.get("hotwords") is not None:
-        overrides["hotwords"] = opts["hotwords"]
-    if overrides and hasattr(model.options, "__dataclass_fields__"):
+    opts = dict(_DEFAULT_ASR_OPTIONS)
+    if asr_options:
+        opts.update(asr_options)
+
+    temperatures = opts["temperatures"]
+    if not isinstance(temperatures, (list, tuple)):
+        temperatures = [temperatures]
+    else:
+        temperatures = list(temperatures)
+
+    overrides = {
+        "temperatures": temperatures,
+        "word_timestamps": opts["word_timestamps"],
+        "initial_prompt": opts["initial_prompt"],
+        "hotwords": opts["hotwords"],
+    }
+    if hasattr(model.options, "__dataclass_fields__"):
         model.options = replace(model.options, **overrides)
-    if "suppress_numerals" in opts:
-        model.suppress_numerals = opts["suppress_numerals"]
+    model.suppress_numerals = opts["suppress_numerals"]
 
 
 async def _transcribe_audio(
@@ -309,7 +288,7 @@ async def transcribe(
     audio_file: UploadFile,
     batch_size: int = config.whisper.batch_size,
     chunk_size: int = config.whisper.chunk_size,
-    asr_options: dict = {},
+    asr_options: dict | None = None,
     language: Language = config.default_language,
     model_name: str = config.whisper.model,
     align: bool = False,

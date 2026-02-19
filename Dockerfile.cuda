@@ -1,56 +1,43 @@
 ARG UBUNTU_VERSION=24.04
 ARG CUDA_VERSION=12.8.1
-ARG BASE_CUDA_RUN_CONTAINER=nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION}
+ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION}
+FROM ${BASE_IMAGE}
 
-FROM ${BASE_CUDA_RUN_CONTAINER} AS base
+LABEL org.opencontainers.image.source="https://github.com/nyralei/whisperx-api-server"
+LABEL org.opencontainers.image.licenses="GPL-3.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    curl \
-    ffmpeg \
-    git \
-    python3 \
-    python3-pip \
-    python3-venv \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace
+RUN useradd --create-home --shell /bin/bash --uid 1000 ubuntu || true
 
-FROM base AS python-env
+USER ubuntu
 
-RUN python3 -m venv /workspace/venv
+ENV HOME=/home/ubuntu \
+    PATH=/home/ubuntu/.local/bin:$PATH
 
-ENV PATH="/workspace/venv/bin:$PATH"
+WORKDIR $HOME/workspace
 
-COPY requirements-cuda.txt ./
+COPY --chown=ubuntu --from=ghcr.io/astral-sh/uv:0.10.4 /uv /bin/uv
 
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements-cuda.txt
+COPY --chown=ubuntu pyproject.toml ./
+RUN uv sync --compile-bytecode --no-install-project --no-dev --extra cuda
 
-COPY requirements.txt constraints.txt ./
+COPY --chown=ubuntu src/whisperx_api_server ./whisperx_api_server
+COPY --chown=ubuntu cuda-docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 
-RUN pip install --no-cache-dir -c constraints.txt -r requirements.txt
-
-FROM base AS runtime
-
-COPY --from=python-env /workspace/venv /workspace/venv
-
-ENV PATH="/workspace/venv/bin:$PATH"
-
-WORKDIR /workspace
-
-COPY src/whisperx_api_server ./whisperx_api_server
-
+RUN mkdir -p $HOME/.cache/huggingface && mkdir -p $HOME/.cache/torch
 ENV UVICORN_HOST=0.0.0.0
 ENV UVICORN_PORT=8000
-
-COPY ./cuda-docker-entrypoint.sh /workspace/docker-entrypoint.sh
-RUN chmod +x /workspace/docker-entrypoint.sh
-
-ENTRYPOINT [ "/workspace/docker-entrypoint.sh" ]
-
+ENV PATH="$HOME/workspace/.venv/bin:$PATH"
+ENV DO_NOT_TRACK=1
+ENV DISABLE_TELEMETRY=1
+ENV HF_HUB_DISABLE_TELEMETRY=1
+ENV PYANNOTE_METRICS_ENABLED=false
+ENTRYPOINT ["/home/ubuntu/workspace/docker-entrypoint.sh"]
 CMD ["uvicorn", "--factory", "whisperx_api_server.main:create_app"]

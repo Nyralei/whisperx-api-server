@@ -10,8 +10,8 @@ services:
     ports:
       - 8000:8000
     volumes:
-      - hugging_face_cache:/root/.cache/huggingface
-      - torch_cache:/root/.cache/torch
+      - hugging_face_cache:/home/ubuntu/.cache/huggingface
+      - torch_cache:/home/ubuntu/.cache/torch
     deploy:
       resources:
         reservations:
@@ -30,8 +30,8 @@ services:
     ports:
       - 8000:8000
     volumes:
-      - hugging_face_cache:/root/.cache/huggingface
-      - torch_cache:/root/.cache/torch
+      - hugging_face_cache:/home/ubuntu/.cache/huggingface
+      - torch_cache:/home/ubuntu/.cache/torch
 volumes:
   hugging_face_cache:
   torch_cache:

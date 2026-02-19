@@ -203,7 +203,7 @@ class Config(BaseSettings):
 
     api_keys_file: str | None = None
 
-    log_level: str = "DEBUG"
+    log_level: str = "INFO"
 
     host: str = Field(alias="UVICORN_HOST", default="0.0.0.0")
     port: int = Field(alias="UVICORN_PORT", default=8000)

@@ -1,0 +1,46 @@
+[project]
+name = "whisperx-api-server"
+version = "1.1.4.1"
+description = "FastAPI server for WhisperX transcription with OpenAI-like API"
+readme = "README.md"
+requires-python = ">=3.10, <3.14"
+dependencies = [
+    "fastapi>=0.120.4",
+    "uvicorn>=0.38.0",
+    "pydantic>=2.12.3",
+    "pydantic-settings>=2.11.0",
+    "python-multipart>=0.0.20",
+    "whisperx~=3.8.1",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch~=2.8.0",
+    "torchaudio~=2.8.0",
+    "torchcodec~=0.7.0",
+    "onnxruntime~=1.21.0"
+]
+cuda = [
+    "torch~=2.8.0",
+    "torchaudio~=2.8.0",
+    "torchcodec~=0.7.0",
+    "onnxruntime~=1.21.0"
+]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "cpu" }, { index = "pytorch-cuda", extra = "cuda" }]
+torchaudio = [{ index = "pytorch-cpu", extra = "cpu" }, { index = "pytorch-cuda", extra = "cuda" }]
+torchcodec = [{ index = "pytorch-cpu", extra = "cpu" }, { index = "pytorch-cuda", extra = "cuda" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

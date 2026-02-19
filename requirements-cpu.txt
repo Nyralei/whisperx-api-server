@@ -1,4 +1,0 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-torch~=2.8.0
-torchaudio~=2.8.0
-torchcodec~=0.7.0

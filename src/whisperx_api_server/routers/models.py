@@ -4,19 +4,16 @@ from fastapi.responses import JSONResponse
 from typing import Annotated
 from pydantic import AfterValidator
 
-from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.config import (
     Language,
     MediaType,
 )
-from whisperx_api_server.models import (
-    load_transcribe_pipeline,
-    load_align_model,
-    load_diarize_pipeline,
-    transcribe_pipeline_instances,
-    align_model_instances,
-    diarize_pipeline_instances,
-    unload_model_object,
+from whisperx_api_server.backends.registry import (
+    get_alignment_backend,
+    get_default_transcription_model_name,
+    get_diarization_backend,
+    get_transcription_backend,
+    resolve_stage_backends,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,11 +25,11 @@ def handle_default_openai_model(
     model_name: str
 ) -> str:
     """Adjust the model name if it defaults to 'whisper-1'."""
-    config = get_config()
     if model_name == "whisper-1":
+        default_model = get_default_transcription_model_name()
         logger.info(
-            f"{model_name} is not a valid model name. Using {config.whisper.model} instead.")
-        return config.whisper.model
+            f"{model_name} is not a valid model name. Using {default_model} instead.")
+        return default_model
     return model_name
 
 
@@ -45,8 +42,13 @@ ModelName = Annotated[str, AfterValidator(handle_default_openai_model)]
     tags=["models", "transcribe"],
 )
 def list_models_endpoint():
-    models = list({key[0] for key in transcribe_pipeline_instances.keys()})
-    return JSONResponse(content={"models": models}, media_type=MediaType.APPLICATION_JSON)
+    try:
+        selected_backends = resolve_stage_backends()
+        backend = get_transcription_backend(selected_backends.transcription)
+        models = backend.list_loaded_models()
+        return JSONResponse(content={"models": models}, media_type=MediaType.APPLICATION_JSON)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 
 @router.post(
@@ -55,14 +57,12 @@ def list_models_endpoint():
     tags=["models", "transcribe"],
 )
 def unload_model_endpoint(model: Annotated[ModelName, Form()]):
-    logging.info(f"Received request to unload model {model}")
+    logger.info(f"Received request to unload model {model}")
     try:
-        to_remove = [k for k in transcribe_pipeline_instances if k[0] == model]
-        for k in to_remove:
-            pipeline = transcribe_pipeline_instances.pop(k, None)
-            if pipeline is not None:
-                unload_model_object(pipeline)
-        response_data = {"status": "success"} if to_remove else {
+        selected_backends = resolve_stage_backends()
+        backend = get_transcription_backend(selected_backends.transcription)
+        unloaded = backend.unload_model(model)
+        response_data = {"status": "success"} if unloaded else {
             "status": "error", "message": f"Model {model} not found"}
         return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
@@ -75,11 +75,13 @@ def unload_model_endpoint(model: Annotated[ModelName, Form()]):
     tags=["models", "transcribe"],
 )
 async def load_model(model: Annotated[ModelName, Form()]):
-    logging.info(f"Received request to load model {model}")
-    if any(key[0] == model for key in transcribe_pipeline_instances):
-        return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
+    logger.info(f"Received request to load model {model}")
     try:
-        await load_transcribe_pipeline(model_name=model)
+        selected_backends = resolve_stage_backends()
+        backend = get_transcription_backend(selected_backends.transcription)
+        if model in backend.list_loaded_models():
+            return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
+        await backend.load_model(model_name=model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
@@ -91,7 +93,12 @@ async def load_model(model: Annotated[ModelName, Form()]):
     tags=["models", "align"],
 )
 def list_align_models_endpoint():
-    return JSONResponse(content={"models": list(align_model_instances.keys())}, media_type=MediaType.APPLICATION_JSON)
+    try:
+        selected_backends = resolve_stage_backends()
+        backend = get_alignment_backend(selected_backends.alignment)
+        return JSONResponse(content={"models": backend.list_loaded_models()}, media_type=MediaType.APPLICATION_JSON)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 
 @router.post(
@@ -100,17 +107,14 @@ def list_align_models_endpoint():
     tags=["models", "align"],
 )
 def unload_align_model_endpoint(language: Annotated[Language, Form()]):
-    logging.info(f"Received request to unload align model {language}")
+    logger.info(f"Received request to unload align model {language}")
     try:
-        if language in align_model_instances:
-            align_model_data = align_model_instances.pop(language, None)
-            if align_model_data is not None:
-                unload_model_object(align_model_data.get("model"))
-                del align_model_data
-            response_data = {"status": "success"}
-        else:
-            response_data = {
-                "status": "error", "message": f"Model with language {language} not found"}
+        selected_backends = resolve_stage_backends()
+        backend = get_alignment_backend(selected_backends.alignment)
+        language_code = getattr(language, "value", language)
+        unloaded = backend.unload_model(str(language_code))
+        response_data = {"status": "success"} if unloaded else {
+            "status": "error", "message": f"Model with language {language_code} not found"}
         return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
@@ -122,12 +126,15 @@ def unload_align_model_endpoint(language: Annotated[Language, Form()]):
     tags=["models", "align"],
 )
 async def load_alignment_endpoint(language: Annotated[Language, Form()]):
-    logging.info(f"Received request to load align model {language}")
-    if language in align_model_instances:
-        return JSONResponse(content={"status": "success", "model": language}, media_type=MediaType.APPLICATION_JSON)
+    logger.info(f"Received request to load align model {language}")
     try:
-        await load_align_model(language)
-        return JSONResponse(content={"status": "success", "model": language}, media_type=MediaType.APPLICATION_JSON)
+        selected_backends = resolve_stage_backends()
+        backend = get_alignment_backend(selected_backends.alignment)
+        language_code = str(getattr(language, "value", language))
+        if language_code in backend.list_loaded_models():
+            return JSONResponse(content={"status": "success", "model": language_code}, media_type=MediaType.APPLICATION_JSON)
+        await backend.load_model(language_code)
+        return JSONResponse(content={"status": "success", "model": language_code}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
@@ -138,7 +145,12 @@ async def load_alignment_endpoint(language: Annotated[Language, Form()]):
     tags=["models", "diarize"],
 )
 def list_diarize_models_endpoint():
-    return JSONResponse(content={"models": list(diarize_pipeline_instances.keys())}, media_type=MediaType.APPLICATION_JSON)
+    try:
+        selected_backends = resolve_stage_backends()
+        backend = get_diarization_backend(selected_backends.diarization)
+        return JSONResponse(content={"models": backend.list_loaded_models()}, media_type=MediaType.APPLICATION_JSON)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
 
 
 @router.post(
@@ -147,16 +159,13 @@ def list_diarize_models_endpoint():
     tags=["models", "diarize"],
 )
 def unload_diarize_model(model: Annotated[ModelName, Form()]):
-    logging.info(f"Received request to unload diarize model {model}")
+    logger.info(f"Received request to unload diarize model {model}")
     try:
-        if model in diarize_pipeline_instances:
-            diarize_model_data = diarize_pipeline_instances.pop(model, None)
-            if diarize_model_data is not None:
-                unload_model_object(diarize_model_data)
-            response_data = {"status": "success"}
-        else:
-            response_data = {"status": "error",
-                             "message": f"Model {model} not found"}
+        selected_backends = resolve_stage_backends()
+        backend = get_diarization_backend(selected_backends.diarization)
+        unloaded = backend.unload_model(model)
+        response_data = {"status": "success"} if unloaded else {
+            "status": "error", "message": f"Model {model} not found"}
         return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
@@ -168,11 +177,13 @@ def unload_diarize_model(model: Annotated[ModelName, Form()]):
     tags=["models", "diarize"],
 )
 async def load_diarization_endpoint(model: Annotated[ModelName, Form()]):
-    logging.info(f"Received request to load diarize model {model}")
-    if model in diarize_pipeline_instances:
-        return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
+    logger.info(f"Received request to load diarize model {model}")
     try:
-        await load_diarize_pipeline(model)
+        selected_backends = resolve_stage_backends()
+        backend = get_diarization_backend(selected_backends.diarization)
+        if model in backend.list_loaded_models():
+            return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
+        await backend.load_model(model_name=model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)

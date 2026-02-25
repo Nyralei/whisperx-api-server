@@ -188,13 +188,21 @@ class DiarizeConfig(BaseModel):
     preload_model: bool = Field(default=False)
 
 
+class BackendsConfig(BaseModel):
+    transcription: str = Field(default="whisperx")
+    alignment: str = Field(default="whisperx")
+    diarization: str = Field(default="whisperx")
+
+
 class Config(BaseSettings):
     """
     Configuration for the application. Values can be set via environment variables.
 
     Pydantic will automatically handle mapping uppercased environment variables to the corresponding fields.
     To populate nested, the environment should be prefixed with the nested field name and an underscore. For example,
-    the environment variable `LOG_LEVEL` will be mapped to `log_level`, `WHISPER__MODEL`(note the double underscore) to `whisper.model`, to set quantization to int8, use `WHISPER__COMPUTE_TYPE=int8`, etc.
+    the environment variable `LOG_LEVEL` will be mapped to `log_level`, `WHISPER__MODEL` (note the double underscore)
+    to `whisper.model`, `BACKENDS__TRANSCRIPTION` to `backends.transcription`, and to set quantization to int8
+    use `WHISPER__COMPUTE_TYPE=int8`, etc.
     """
 
     model_config = SettingsConfigDict(env_nested_delimiter="__")
@@ -218,6 +226,8 @@ class Config(BaseSettings):
     alignment: AlignConfig = AlignConfig()
 
     diarization: DiarizeConfig = DiarizeConfig()
+
+    backends: BackendsConfig = BackendsConfig()
 
     cache_cleanup: bool = True
 

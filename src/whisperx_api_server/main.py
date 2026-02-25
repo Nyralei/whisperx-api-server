@@ -11,10 +11,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from whisperx_api_server.dependencies import ApiKeyDependency, get_config
 from whisperx_api_server.logger import setup_logger
 
-from whisperx_api_server.models import (
-    load_transcribe_pipeline,
-    load_align_model,
-    load_diarize_pipeline,
+from whisperx_api_server.backends.registry import (
+    get_alignment_backend,
+    get_diarization_backend,
+    get_transcription_backend,
+    resolve_stage_backends,
 )
 
 from whisperx_api_server.routers.misc import (
@@ -41,39 +42,32 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    config = get_config()
     logger = logging.getLogger(__name__)
-    if config.whisper.preload_model:
-        logger.info(f"Preloading model {config.whisper.model}")
-        try:
-            await load_transcribe_pipeline(
-                model_name=config.whisper.model,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to preload model; will load on demand")
+    selected_backends = resolve_stage_backends()
+    logger.info(
+        f"Configured stage backends: transcription={selected_backends.transcription}, "
+        f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
+    )
     try:
-        if config.alignment.preload_model:
-            if config.alignment.preload_model_name:
-                logger.info(
-                    f"Preloading alignment model for: {config.alignment.preload_model_name}")
-                await load_align_model(config.alignment.preload_model_name)
-
-            elif config.alignment.whitelist:
-                for lang in config.alignment.whitelist:
-                    logger.info(f"Preloading alignment model for: {lang}")
-                    await load_align_model(lang)
+        transcription_backend = get_transcription_backend(
+            selected_backends.transcription)
+        await transcription_backend.preload_default()
     except Exception:
         logger.exception(
-            "Failed to preload alignment model(s); will load on demand")
+            "Failed to preload transcription backend; will try to load on demand")
     try:
-        if config.diarization.preload_model:
-            logger.info(
-                f"Preloading diarization model {config.diarization.model}")
-            await load_diarize_pipeline(model_name=config.diarization.model)
+        alignment_backend = get_alignment_backend(selected_backends.alignment)
+        await alignment_backend.preload_default()
     except Exception:
         logger.exception(
-            "Failed to preload diarization model; will load on demand")
+            "Failed to preload alignment backend; will try to load on demand")
+    try:
+        diarization_backend = get_diarization_backend(
+            selected_backends.diarization)
+        await diarization_backend.preload_default()
+    except Exception:
+        logger.exception(
+            "Failed to preload diarization backend; will try to load on demand")
 
     yield
 

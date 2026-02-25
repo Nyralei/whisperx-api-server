@@ -44,10 +44,20 @@ def handle_whisperx_format(transcript, writer_class, options):
     """
     writer = writer_class(output_dir=None)
     output = ListWriter()
+    segments = transcript.get("segments")
+    if isinstance(segments, list):
+        writer_input = {
+            "segments": segments,
+            "language": transcript.get("language"),
+        }
+    elif isinstance(segments, dict):
+        writer_input = dict(segments)
+        writer_input.setdefault("language", transcript.get("language"))
+    else:
+        raise ValueError(
+            "Invalid transcript payload: 'segments' must be a list or dict.")
 
-    transcript["segments"]["language"] = transcript["language"]
-
-    writer.write_result(transcript["segments"], output, options)
+    writer.write_result(writer_input, output, options)
 
     return output.get_output()
 

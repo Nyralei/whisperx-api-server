@@ -3,7 +3,7 @@ import os
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,21 +14,18 @@ import tempfile
 import asyncio
 from fastapi import UploadFile
 
-from whisperx import asr as whisperx_asr
 from whisperx import audio as whisperx_audio
-from whisperx import alignment as whisperx_alignment
-from whisperx import diarize as whisperx_diarize
-from whisperx import schema as whisperx_schema
 
 from whisperx_api_server.config import (
     Language,
 )
 from whisperx_api_server.dependencies import get_config
-from whisperx_api_server.models import (
-    load_align_model,
-    load_diarize_pipeline,
-    load_transcribe_pipeline,
-    determine_inference_device
+from whisperx_api_server.backends.registry import (
+    get_default_transcription_model_name,
+    get_alignment_backend,
+    get_diarization_backend,
+    get_transcription_backend,
+    resolve_stage_backends,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,13 +36,6 @@ _concurrency_semaphore = None
 _io_executor: ThreadPoolExecutor | None = None
 _UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 _UPLOAD_WRITE_BUFFER_SIZE = 1024 * 1024  # 1 MiB
-_DEFAULT_ASR_OPTIONS = {
-    "suppress_numerals": True,
-    "temperatures": 0.0,
-    "word_timestamps": False,
-    "initial_prompt": None,
-    "hotwords": None,
-}
 
 
 def _get_concurrency_semaphore() -> asyncio.Semaphore | None:
@@ -152,129 +142,7 @@ async def _load_audio(file_path: str, request_id: str) -> np.ndarray:
         raise
 
 
-def _apply_request_options(model: whisperx_asr.FasterWhisperPipeline, asr_options: dict | None) -> None:
-    """Apply per-request asr_options to the pipeline so each request can set language, hotwords, etc."""
-    opts = dict(_DEFAULT_ASR_OPTIONS)
-    if asr_options:
-        opts.update(asr_options)
-
-    temperatures = opts["temperatures"]
-    if not isinstance(temperatures, (list, tuple)):
-        temperatures = [temperatures]
-    else:
-        temperatures = list(temperatures)
-
-    overrides = {
-        "temperatures": temperatures,
-        "word_timestamps": opts["word_timestamps"],
-        "initial_prompt": opts["initial_prompt"],
-        "hotwords": opts["hotwords"],
-    }
-    if hasattr(model.options, "__dataclass_fields__"):
-        model.options = replace(model.options, **overrides)
-    model.suppress_numerals = opts["suppress_numerals"]
-
-
-async def _transcribe_audio(
-    model: whisperx_asr.FasterWhisperPipeline,
-    audio: np.ndarray,
-    batch_size: int,
-    chunk_size: int,
-    language: Language,
-    task: str,
-    asr_options: dict | None,
-    request_id: str,
-):
-    loop = asyncio.get_running_loop()
-    lang = getattr(language, "value", language) if language else None
-    num_workers = 0 if determine_inference_device(
-    ) == "cuda" else config.whisper.num_workers
-    lock = getattr(model, "_transcribe_lock", None)
-
-    def _run_transcription():
-        with torch.inference_mode():
-            return model.transcribe(
-                audio=audio,
-                batch_size=batch_size,
-                chunk_size=chunk_size,
-                num_workers=num_workers,
-                language=lang,
-                task=task,
-            )
-
-    async def _do_transcribe():
-        if lock is not None:
-            async with lock:
-                _apply_request_options(model, asr_options)
-                return await loop.run_in_executor(None, _run_transcription)
-        _apply_request_options(model, asr_options)
-        return await loop.run_in_executor(None, _run_transcription)
-
-    result = await _do_transcribe()
-    logger.info(f"Request ID: {request_id} - Transcription completed")
-    return result
-
-
-async def _align_audio(result: whisperx_schema.TranscriptionResult, audio: np.ndarray, request_id: str) -> whisperx_schema.TranscriptionResult:
-    loop = asyncio.get_running_loop()
-    device = determine_inference_device()
-    try:
-        alignment_model_start = time.time()
-        logger.info(f"Request ID: {request_id} - Loading alignment model")
-        model_a, metadata = await load_align_model(language_code=result["language"])
-        logger.info(f"Request ID: {request_id} - Alignment model loaded")
-        logger.info(
-            f"Request ID: {request_id} - Loading alignment model took {time.time() - alignment_model_start:.2f} seconds")
-
-        def _run_alignment():
-            with torch.inference_mode():
-                return whisperx_alignment.align(
-                    transcript=result["segments"],
-                    model=model_a,
-                    align_model_metadata=metadata,
-                    audio=audio,
-                    device=device,
-                    return_char_alignments=False
-                )
-        alignment_start = time.time()
-        result["segments"] = await loop.run_in_executor(None, _run_alignment)
-        logger.info(
-            f"Request ID: {request_id} - Alignment took {time.time() - alignment_start:.2f} seconds")
-        return result
-    except Exception as e:
-        logger.error(f"Request ID: {request_id} - Alignment failed: {e}")
-        raise
-
-
-async def _diarize_audio(result: whisperx_schema.TranscriptionResult, audio: np.ndarray, speaker_embeddings: bool, request_id: str) -> whisperx_schema.TranscriptionResult:
-    loop = asyncio.get_running_loop()
-    try:
-        diarization_model_start = time.time()
-        logger.info(f"Request ID: {request_id} - Loading diarization model")
-        diarize_model = await load_diarize_pipeline(model_name=config.diarization.model)
-        logger.info(
-            f"Request ID: {request_id} - Diarization model loaded. Loading took {time.time() - diarization_model_start:.2f} seconds. Starting diarization")
-
-        def _run_diarization():
-            with torch.inference_mode():
-                if speaker_embeddings:
-                    return diarize_model(audio=audio, return_embeddings=True)
-                else:
-                    return diarize_model(audio=audio), None
-        diarize_start = time.time()
-        diarize_segments, embeddings = await loop.run_in_executor(None, _run_diarization)
-        result["segments"] = whisperx_diarize.assign_word_speakers(
-            diarize_segments, result["segments"], embeddings)
-
-        logger.info(
-            f"Request ID: {request_id} - Diarization took {time.time() - diarize_start:.2f} seconds")
-        return result
-    except Exception as e:
-        logger.error(f"Request ID: {request_id} - Diarization failed: {e}")
-        raise
-
-
-def _finalize_text(result: whisperx_schema.TranscriptionResult, align_or_diarize: bool) -> whisperx_schema.TranscriptionResult:
+def _finalize_text(result: dict[str, Any], align_or_diarize: bool) -> dict[str, Any]:
     segments = result.get("segments", [])
     if align_or_diarize and isinstance(segments, dict):
         segments = segments.get("segments", [])
@@ -290,17 +158,18 @@ async def transcribe(
     chunk_size: int = config.whisper.chunk_size,
     asr_options: dict | None = None,
     language: Language = config.default_language,
-    model_name: str = config.whisper.model,
+    model_name: str | None = None,
     align: bool = False,
     diarize: bool = False,
     speaker_embeddings: bool = False,
     request_id: str = "",
-    task: str = "transcribe"
-) -> whisperx_schema.TranscriptionResult:
+    task: str = "transcribe",
+) -> dict[str, Any]:
     start_time = time.perf_counter()
     file_path = None
     audio = None
     concurrency_sem = _get_concurrency_semaphore()
+    semaphore_acquired = False
     profile: dict[str, float] = {}
 
     try:
@@ -312,17 +181,29 @@ async def transcribe(
 
         if concurrency_sem:
             await concurrency_sem.acquire()
+            semaphore_acquired = True
             logger.debug(
                 f"Request ID: {request_id} - Acquired GPU concurrency semaphore")
 
-        logger.info(
-            f"Request ID: {request_id} - Transcribing {audio_file.filename} with model: {model_name} and options: {asr_options}, language: {language}, task: {task}")
+        selected_backends = resolve_stage_backends()
+        transcription_stage_backend = get_transcription_backend(
+            selected_backends.transcription)
+        alignment_stage_backend = (
+            get_alignment_backend(selected_backends.alignment)
+            if (align or diarize)
+            else None
+        )
+        diarization_stage_backend = (
+            get_diarization_backend(selected_backends.diarization)
+            if diarize
+            else None
+        )
 
-        t0 = time.perf_counter()
-        model = await load_transcribe_pipeline(model_name=model_name)
-        profile["model_load"] = time.perf_counter() - t0
+        if not model_name:
+            model_name = get_default_transcription_model_name()
+
         logger.info(
-            f"Request ID: {request_id} - Loading model pipeline took {profile['model_load']:.2f} seconds")
+            f"Request ID: {request_id} - Transcribing {audio_file.filename} with model: {model_name}, options: {asr_options}, language: {language}, task: {task}, stage_backends: {selected_backends}")
 
         t0 = time.perf_counter()
         audio = await _load_audio(file_path, request_id)
@@ -338,23 +219,43 @@ async def transcribe(
             file_path = None
 
         t0 = time.perf_counter()
-        result = await _transcribe_audio(
-            model, audio, batch_size, chunk_size, language, task, asr_options, request_id
+        result = await transcription_stage_backend.transcribe(
+            model_name=model_name,
+            audio=audio,
+            batch_size=batch_size,
+            chunk_size=chunk_size,
+            language=language,
+            task=task,
+            asr_options=asr_options,
+            request_id=request_id,
         )
         profile["transcribe"] = time.perf_counter() - t0
         logger.info(
             f"Request ID: {request_id} - Transcription took {profile['transcribe']:.2f} seconds")
 
         if align or diarize:
+            if alignment_stage_backend is None:
+                raise RuntimeError("Alignment backend is not initialized.")
             t0 = time.perf_counter()
-            result = await _align_audio(result, audio, request_id)
+            result = await alignment_stage_backend.align(
+                result=result,
+                audio=audio,
+                request_id=request_id,
+            )
             profile["align"] = time.perf_counter() - t0
             logger.debug(
                 f"Request ID: {request_id} - Alignment took {profile['align']:.2f} seconds")
 
         if diarize:
+            if diarization_stage_backend is None:
+                raise RuntimeError("Diarization backend is not initialized.")
             t0 = time.perf_counter()
-            result = await _diarize_audio(result, audio, speaker_embeddings, request_id)
+            result = await diarization_stage_backend.diarize(
+                result=result,
+                audio=audio,
+                speaker_embeddings=speaker_embeddings,
+                request_id=request_id,
+            )
             profile["diarize"] = time.perf_counter() - t0
             logger.debug(
                 f"Request ID: {request_id} - Diarization took {profile['diarize']:.2f} seconds")
@@ -378,7 +279,7 @@ async def transcribe(
         raise
     finally:
         with contextlib.suppress(Exception):
-            if concurrency_sem:
+            if concurrency_sem and semaphore_acquired:
                 concurrency_sem.release()
         with contextlib.suppress(Exception):
             if file_path is not None and os.path.exists(file_path):

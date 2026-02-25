@@ -1,15 +1,15 @@
-import logging
 import asyncio
 import contextlib
 import gc
-from collections import defaultdict
+import logging
 from asyncio import Lock
-from typing import Dict, Optional, Tuple, Any
+from collections import defaultdict
+from typing import Any, Dict, Optional, Tuple
 
 import torch
-from whisperx import transcribe as whisperx_transcribe
 from whisperx import alignment as whisperx_alignment
 from whisperx import diarize as whisperx_diarize
+from whisperx import transcribe as whisperx_transcribe
 from whisperx.asr import FasterWhisperPipeline
 
 from whisperx_api_server.dependencies import get_config
@@ -31,14 +31,15 @@ def _hashable_options(opts: Any) -> Any:
 transcribe_pipeline_instances: Dict[Tuple[Any, ...],
                                     FasterWhisperPipeline] = {}
 transcribe_pipeline_locks = defaultdict(Lock)
-align_model_instances = {}
+align_model_instances: dict[str, dict[str, Any]] = {}
 alignment_locks = defaultdict(Lock)
 alignment_cache_mod_lock = Lock()
-diarize_pipeline_instances = {}
+diarize_pipeline_instances: dict[str,
+                                 whisperx_diarize.DiarizationPipeline] = {}
 diarize_locks = defaultdict(Lock)
 
 
-def unload_model_object(model_obj: Any):
+def unload_model_object(model_obj: Any) -> None:
     if model_obj is None:
         return
     with contextlib.suppress(Exception):
@@ -51,7 +52,7 @@ def unload_model_object(model_obj: Any):
     torch.cuda.empty_cache()
 
 
-def check_device():
+def check_device() -> str:
     try:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except Exception:
@@ -59,7 +60,7 @@ def check_device():
         return "cpu"
 
 
-def determine_inference_device():
+def determine_inference_device() -> str:
     config = get_config()
     inference_device = config.whisper.inference_device.value
     if inference_device == "auto":
@@ -68,9 +69,9 @@ def determine_inference_device():
 
 
 async def _get_or_init_model(
-    key,
-    cache_dict: dict,
-    lock_dict: dict,
+    key: Any,
+    cache_dict: dict[Any, Any],
+    lock_dict: dict[Any, Lock],
     init_func,
     log_reuse: str = "Reusing cached model instance for {key}",
     log_init: str = "Initializing model: {key}",
@@ -92,9 +93,7 @@ async def _get_or_init_model(
         return instance
 
 
-async def load_transcribe_pipeline(
-    model_name: str,
-) -> FasterWhisperPipeline:
+async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
     config = get_config()
     inference_device = determine_inference_device()
     compute_type = config.whisper.compute_type.value
@@ -133,6 +132,13 @@ async def load_transcribe_pipeline(
             use_auth_token=config.hf_token,
         )
 
+    if not config.whisper.cache:
+        logger.info(
+            f"Initializing transcribe pipeline without cache: {cache_key}")
+        pipeline = await asyncio.to_thread(_create_pipeline)
+        pipeline._transcribe_lock = transcribe_pipeline_locks[cache_key]
+        return pipeline
+
     pipeline = await _get_or_init_model(
         key=cache_key,
         cache_dict=transcribe_pipeline_instances,
@@ -141,23 +147,18 @@ async def load_transcribe_pipeline(
         log_reuse="Reusing cached transcribe pipeline: {key}",
         log_init="Initializing transcribe pipeline: {key}",
     )
-
-    if not config.whisper.cache:
-        transcribe_pipeline_instances.pop(cache_key, None)
-
     pipeline._transcribe_lock = transcribe_pipeline_locks[cache_key]
     return pipeline
 
 
-async def _cleanup_alignment_cache_whitelist(keep_key: Optional[str] = None):
+async def _cleanup_alignment_cache_whitelist(keep_key: Optional[str] = None) -> None:
     config = get_config()
     whitelist = config.alignment.whitelist
     if not whitelist:
         return
     async with alignment_cache_mod_lock:
         keys_to_remove = [
-            k for k in align_model_instances
-            if k not in whitelist and k != keep_key]
+            k for k in align_model_instances if k not in whitelist and k != keep_key]
         for key in keys_to_remove:
             logger.info(
                 f"Unloading alignment model for {key} (not in whitelist).")
@@ -170,9 +171,8 @@ async def _cleanup_alignment_cache_whitelist(keep_key: Optional[str] = None):
 async def load_align_model(
     language_code: str,
     model_name: Optional[str] = None,
-    model_dir: Optional[str] = None
+    model_dir: Optional[str] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
-
     config = get_config()
     inference_device = determine_inference_device()
     selected_model_name = model_name
@@ -183,10 +183,13 @@ async def load_align_model(
     elif language_code in config.alignment.models:
         selected_model_name = config.alignment.models[language_code]
         logger.info(
-            f"Using configured alignment model for '{language_code}': {selected_model_name}")
+            f"Using configured alignment model for '{language_code}': {selected_model_name}"
+        )
 
-    if (selected_model_name is not None
-            and selected_model_name == config.alignment.models.get("multilingual")):
+    if (
+        selected_model_name is not None
+        and selected_model_name == config.alignment.models.get("multilingual")
+    ):
         cache_key = "multilingual"
     else:
         cache_key = language_code
@@ -195,9 +198,10 @@ async def load_align_model(
 
     logger.debug(f"config.alignment.models = {config.alignment.models}")
     logger.debug(
-        f"Incoming language_code = {language_code}, model_name param = {model_name}")
+        f"Incoming language_code = {language_code}, model_name param = {model_name}"
+    )
 
-    async def _init_alignment():
+    async def _init_alignment() -> Tuple[Any, Dict[str, Any]]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
@@ -207,10 +211,14 @@ async def load_align_model(
                 model_name=selected_model_name,
                 model_dir=model_dir,
                 model_cache_only=config.alignment.local_files_only,
-            )
+            ),
         )
 
-    async def _init_wrapper():
+    if not config.alignment.cache:
+        logger.info(f"Initializing alignment model without cache: {cache_key}")
+        return await _init_alignment()
+
+    async def _init_wrapper() -> dict[str, Any]:
         model, metadata = await _init_alignment()
         return {"model": model, "metadata": metadata}
 
@@ -222,12 +230,6 @@ async def load_align_model(
         log_reuse="Reusing cached alignment model for: {key}",
         log_init="Initializing alignment model for: {key}",
     )
-
-    if not config.alignment.cache:
-        async with alignment_cache_mod_lock:
-            removed = align_model_instances.pop(cache_key, None)
-            if removed:
-                unload_model_object(removed.get("model"))
     return model_data["model"], model_data["metadata"]
 
 
@@ -240,8 +242,13 @@ async def load_diarize_pipeline(model_name: str) -> whisperx_diarize.Diarization
         return whisperx_diarize.DiarizationPipeline(
             model_name=model_name,
             token=config.hf_token,
-            device=inference_device
+            device=inference_device,
         )
+
+    if not config.diarization.cache:
+        logger.info(
+            f"Initializing diarization model without cache: {model_name}")
+        return await asyncio.to_thread(_init_diarization)
 
     diarize_model = await _get_or_init_model(
         key=model_name,
@@ -251,9 +258,4 @@ async def load_diarize_pipeline(model_name: str) -> whisperx_diarize.Diarization
         log_reuse="Reusing cached diarization model for: {key}",
         log_init="Initializing diarization model: {key}",
     )
-
-    if not config.diarization.cache:
-        removed = diarize_pipeline_instances.pop(model_name, None)
-        if removed is not None:
-            unload_model_object(removed)
     return diarize_model

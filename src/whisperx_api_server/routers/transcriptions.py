@@ -19,6 +19,9 @@ import time
 import whisperx_api_server.transcriber as transcriber
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
+from whisperx_api_server.backends.registry import (
+    get_default_transcription_model_name,
+)
 from whisperx_api_server.config import (
     Language,
     ResponseFormat,
@@ -62,12 +65,12 @@ def get_timestamp_granularities(
 
 
 """
-OpenAI-like endpoint to transcribe audio files using the Whisper ASR model.
+OpenAI-like endpoint to transcribe audio files using the configured transcription backend.
 
 Args:
     request (Request): The HTTP request object.
     file (UploadFile): The audio file to transcribe.
-    model (ModelName): The model to use for the transcription.
+    model (ModelName): The model to use for transcription.
     language (Language): The language to use for the transcription. Defaults to "en".
     prompt (str): The prompt to use for the transcription.
     response_format (ResponseFormat): The response format to use for the transcription. Defaults to "json".
@@ -88,13 +91,13 @@ Returns:
 
 @router.post(
     "/v1/audio/transcriptions",
-    description="Transcribe audio files using the Whisper ASR model.",
+    description="Transcribe audio files using the configured transcription backend.",
     tags=["Transcription"],
 )
 async def transcribe_audio(
     request: Request,
     file: UploadFile,
-    model: Annotated[ModelName, Form()] = config.whisper.model,
+    model: Annotated[ModelName, Form()] = get_default_transcription_model_name(),
     language: Annotated[Language, Form()] = config.default_language,
     prompt: Annotated[str, Form()] = None,
     response_format: Annotated[ResponseFormat,
@@ -170,7 +173,7 @@ async def transcribe_audio(
             diarize=diarize,
             speaker_embeddings=speaker_embeddings,
             chunk_size=chunk_size,
-            request_id=request_id
+            request_id=request_id,
         )
     except Exception as e:
         logger.exception(
@@ -187,12 +190,12 @@ async def transcribe_audio(
     return format_transcription(transcription, response_format, highlight_words=highlight_words)
 
 """
-OpenAI-like endpoint to translate audio files using the Whisper ASR model.
+OpenAI-like endpoint to translate audio files using the configured transcription backend.
 
 Args:
     request (Request): The HTTP request object.
     file (UploadFile): The audio file to translate.
-    model (ModelName): The model to use for the translation.
+    model (ModelName): The model to use for translation.
     prompt (str): The prompt to use for the translation.
     response_format (ResponseFormat): The response format to use for the translation. Defaults to "json".
     temperature (float): The temperature to use for the translation. Defaults to 0.0.
@@ -205,13 +208,13 @@ Returns:
 
 @router.post(
     "/v1/audio/translations",
-    description="Translate audio files using the Whisper ASR model",
+    description="Translate audio files using the configured transcription backend",
     tags=["Translation"],
 )
 async def translate_audio(
     request: Request,
     file: UploadFile,
-    model: Annotated[ModelName, Form()] = config.whisper.model,
+    model: Annotated[ModelName, Form()] = get_default_transcription_model_name(),
     prompt: Annotated[str, Form()] = "",
     response_format: Annotated[ResponseFormat,
                                Form()] = config.default_response_format,
@@ -243,7 +246,7 @@ async def translate_audio(
             model_name=model,
             chunk_size=chunk_size,
             request_id=request_id,
-            task="translate"
+            task="translate",
         )
     except Exception as e:
         logger.exception(f"Request ID: {request_id} - Translation failed: {e}")

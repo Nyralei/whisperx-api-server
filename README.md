@@ -1,11 +1,12 @@
 ## Overview
 
-WhisperX API Server is a FastAPI-based server designed to transcribe audio files using the Whisper ASR (Automatic Speech Recognition) model based on WhisperX (https://github.com/m-bain/WhisperX) Python library. The API offers an OpenAI-like interface that allows users to upload audio files and receive transcription results in various formats. It supports customizable options such as different models, languages, temperature settings, and more.
+WhisperX API Server is a FastAPI-based server designed to transcribe audio files using pluggable stage backends, with WhisperX (https://github.com/m-bain/WhisperX) as the default implementation. The API offers an OpenAI-like interface that allows users to upload audio files and receive transcription results in various formats. It supports customizable options such as different models, languages, temperature settings, and more.
 
 Features
-1. Audio Transcription: Transcribe audio files using the Whisper ASR model.
+1. Audio Transcription: Transcribe audio files using the configured transcription backend.
 2. Model Caching: Load and cache models for reusability and faster performance.
 3. OpenAI-like API, based on https://platform.openai.com/docs/api-reference/audio/createTranscription and https://platform.openai.com/docs/api-reference/audio/createTranslation
+4. Pluggable pipeline stages: choose backend per stage (`transcription`, `alignment`, `diarization`) and mix different backends.
 
 ## API Endpoints
 
@@ -14,7 +15,7 @@ https://platform.openai.com/docs/api-reference/audio/createTranscription
 
 **Parameters**:
 - `file`: The audio file to transcribe.
-- `model (str)`: Whisper model name. Default is `config.whisper.model`. If `whisper-1` is provided, it is replaced with the configured default model.
+- `model (str)`: Model name for the configured transcription backend. If `whisper-1` is provided, it is replaced with the configured default transcription model.
 - `language (str | null)`: Language code for transcription. Default is `config.default_language`.
 - `prompt (str | null)`: Optional transcription prompt. Default is `null`.
 - `response_format (str)`: One of `text`, `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud`. Default is `config.default_response_format`.
@@ -41,7 +42,7 @@ https://platform.openai.com/docs/api-reference/audio/createTranslation
 
 **Parameters**:
 - `file`: The audio file to translate.
-- `model (str)`: Whisper model name. Default is `config.whisper.model`. If `whisper-1` is provided, it is replaced with the configured default model.
+- `model (str)`: Model name for the configured transcription backend. If `whisper-1` is provided, it is replaced with the configured default transcription model.
 - `prompt (str)`: Optional translation prompt. Default is an empty string.
 - `response_format (str)`: One of `text`, `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud`. Default is `config.default_response_format`.
 - `temperature (float)`: Temperature setting for translation. Default is `0.0`.
@@ -97,6 +98,20 @@ Loads a diarization model.
 
 **Parameters**:
 - `model (str)`: Diarization model name to load.
+
+### Backend Selection
+
+You can define default backend per pipeline stage through environment variables:
+
+```bash
+BACKENDS__TRANSCRIPTION=whisperx
+BACKENDS__ALIGNMENT=whisperx
+BACKENDS__DIARIZATION=whisperx
+```
+
+By default, only the `whisperx` backend is registered. Additional backends can be added and combined per stage.
+
+Model management endpoints (`/models/*`, `/align_models/*`, `/diarize_models/*`) operate through the configured stage backends.
 
 ### Running the API
 

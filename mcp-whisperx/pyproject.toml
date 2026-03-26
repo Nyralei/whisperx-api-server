@@ -1,0 +1,23 @@
+[project]
+name = "whisperx-mcp-sidecar"
+version = "0.1.0"
+description = "MCP sidecar server for whisperx-api-server HTTP API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=1.26.0",
+]
+
+[project.scripts]
+whisperx-mcp = "whisperx_mcp_server.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

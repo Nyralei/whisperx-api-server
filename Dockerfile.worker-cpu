@@ -12,29 +12,33 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash --uid 1000 ubuntu || true
+
 USER ubuntu
+
 ENV HOME=/home/ubuntu \
     PATH=/home/ubuntu/.local/bin:$PATH
+
 WORKDIR $HOME/workspace
 
 COPY --chown=ubuntu --from=ghcr.io/astral-sh/uv:0.10.4 /uv /bin/uv
 
 COPY --chown=ubuntu pyproject.toml ./
-ARG UV_EXTRA_ARGS=""
-RUN uv sync --compile-bytecode --no-install-project --no-dev --extra cpu ${UV_EXTRA_ARGS}
+RUN uv sync --compile-bytecode --no-install-project --no-dev --extra cpu --extra kafka
+
 ENV PATH="$HOME/workspace/.venv/bin:$PATH"
+
 RUN mkdir -p $HOME/nltk_data/tokenizers
 RUN python3 -m nltk.downloader -d $HOME/nltk_data punkt_tab
 ENV NLTK_DATA=$HOME/nltk_data
 
 COPY --chown=ubuntu src/whisperx_api_server ./whisperx_api_server
+COPY --chown=ubuntu src/whisperx_worker ./whisperx_worker
 
 RUN mkdir -p $HOME/.cache/huggingface && mkdir -p $HOME/.cache/torch
-ENV UVICORN_HOST=0.0.0.0
-ENV UVICORN_PORT=8000
-ENV PATH="$HOME/workspace/.venv/bin:$PATH"
+
 ENV DO_NOT_TRACK=1
 ENV DISABLE_TELEMETRY=1
 ENV HF_HUB_DISABLE_TELEMETRY=1
 ENV PYANNOTE_METRICS_ENABLED=false
-CMD ["uvicorn", "--factory", "whisperx_api_server.main:create_app"]
+
+CMD ["python", "-m", "whisperx_worker.main"]

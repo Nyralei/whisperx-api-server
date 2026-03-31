@@ -20,6 +20,8 @@ from whisperx_api_server.config import (
     Language,
 )
 from whisperx_api_server.dependencies import get_config
+import whisperx_api_server.s3_client as s3_client
+import whisperx_api_server.kafka_client as kafka_client
 from whisperx_api_server.backends.registry import (
     get_default_transcription_model_name,
     get_alignment_backend,
@@ -43,8 +45,8 @@ def _get_concurrency_semaphore() -> asyncio.Semaphore | None:
     if not torch.cuda.is_available():
         return None
     if _concurrency_semaphore is None:
-        max_concurrent = int(os.getenv("MAX_CONCURRENT_TRANSCRIPTIONS", "1"))
-        _concurrency_semaphore = asyncio.Semaphore(max_concurrent)
+        _concurrency_semaphore = asyncio.Semaphore(
+            config.max_concurrent_transcriptions)
     return _concurrency_semaphore
 
 
@@ -58,9 +60,8 @@ def _cleanup_cache_only():
 def _get_io_executor() -> ThreadPoolExecutor:
     global _io_executor
     if _io_executor is None:
-        workers = int(os.getenv("IO_EXECUTOR_WORKERS", "4"))
         _io_executor = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="whisperx_io")
+            max_workers=config.io_executor_workers, thread_name_prefix="whisperx_io")
     return _io_executor
 
 
@@ -290,3 +291,40 @@ async def transcribe(
         if config.cache_cleanup:
             _cleanup_cache_only()
             logger.info(f"Request ID: {request_id} - Cache cleanup completed")
+
+
+class QueueFullError(Exception):
+    pass
+
+
+async def transcribe_via_kafka(
+    audio_file: UploadFile,
+    *,
+    params: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    max_pending = config.kafka.max_pending_jobs
+    if max_pending > 0 and len(kafka_client._pending_jobs) >= max_pending:
+        raise QueueFullError(
+            f"Too many pending jobs ({len(kafka_client._pending_jobs)}/{max_pending})"
+        )
+
+    logger.info(f"Request ID: {request_id} - Uploading audio to S3")
+    audio_bytes = await audio_file.read()
+    s3_key = await s3_client.upload_audio(audio_bytes, request_id, audio_file.filename or "audio")
+    del audio_bytes
+
+    logger.info(
+        f"Request ID: {request_id} - Submitting job to Kafka (key: {s3_key})")
+    future = await kafka_client.submit_job(request_id, s3_key, audio_file.filename or "audio", params)
+    try:
+        result = await asyncio.wait_for(future, timeout=config.kafka.reply_timeout_seconds)
+        logger.info(f"Request ID: {request_id} - Received result from worker")
+        return result
+    except asyncio.TimeoutError:
+        kafka_client._pending_jobs.pop(request_id, None)
+        logger.error(
+            f"Request ID: {request_id} - Timed out waiting for worker reply")
+        raise TimeoutError(
+            f"Job {request_id} timed out after {config.kafka.reply_timeout_seconds}s"
+        )

@@ -1,107 +1,141 @@
-## Overview
+# WhisperX API Server
 
-WhisperX API Server is a FastAPI-based server designed to transcribe audio files using pluggable stage backends, with WhisperX (https://github.com/m-bain/WhisperX) as the default implementation. The API offers an OpenAI-like interface that allows users to upload audio files and receive transcription results in various formats. It supports customizable options such as different models, languages, temperature settings, and more.
+A FastAPI server that exposes [WhisperX](https://github.com/m-bain/WhisperX) as an OpenAI-compatible audio transcription API. Supports both a simple single-server mode and a horizontally scalable distributed mode backed by Kafka and S3.
 
-Features
-1. Audio Transcription: Transcribe audio files using the configured transcription backend.
-2. Model Caching: Load and cache models for reusability and faster performance.
-3. OpenAI-like API, based on https://platform.openai.com/docs/api-reference/audio/createTranscription and https://platform.openai.com/docs/api-reference/audio/createTranslation
-4. Pluggable pipeline stages: choose backend per stage (`transcription`, `alignment`, `diarization`) and mix different backends.
+## Features
 
-## API Endpoints
+- **OpenAI-compatible** — drop-in replacement for `/v1/audio/transcriptions` and `/v1/audio/translations`
+- **Alignment & diarization** — word-level timestamps and speaker labels out of the box
+- **Multiple output formats** — `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud`, `text`
+- **Distributed mode** — offload GPU work to dedicated workers via Kafka + S3 (MinIO)
+- **Pluggable backends** — swap transcription, alignment, and diarization implementations per stage
+- **API key auth** — single key or a JSON key-map for multi-client setups
+
+## Quick Start
+
+### Standalone (single server)
+
+```bash
+# GPU (CUDA)
+docker compose --profile cuda up
+
+# CPU
+docker compose --profile cpu up
+```
+
+The API is available at `http://localhost:8000`.
+
+### Distributed mode (Kafka + workers)
+
+```bash
+# Copy and edit credentials before first run
+cp .env.example .env
+
+# CUDA workers
+docker compose -f compose-kafka.yaml --profile cuda up
+
+# CPU workers
+docker compose -f compose-kafka.yaml --profile cpu up
+
+# Both worker types simultaneously
+docker compose -f compose-kafka.yaml --profile cuda --profile cpu up
+```
+
+> Workers process one job at a time per container. Scale horizontally by running multiple worker replicas.
+
+## Configuration
+
+All settings are environment variables. Nested fields use `__` as a delimiter (e.g. `WHISPER__MODEL=large-v3`).
+
+All available settings are defined in [`config.py`](src/whisperx_api_server/config.py). Variables you'll most likely need to set:
+
+| Variable | Default | Description |
+|---|---|---|
+| `WHISPER__MODEL` | `large-v3` | Transcription model name |
+| `WHISPER__COMPUTE_TYPE` | `default` | Quantization — `float16` for GPU, `float32` for CPU |
+| `WHISPER__INFERENCE_DEVICE` | `auto` | `cpu`, `cuda`, or `auto` |
+| `HF_TOKEN` | — | Hugging Face token (required for pyannote diarization) |
+| `API_KEY` | — | Single API key for all requests |
+| `API_KEYS_FILE` | — | Path to JSON file mapping key → client name |
+| `MODE` | `direct` | `direct` or `kafka` |
+
+**Additional variables for Kafka mode:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `KAFKA__BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker address |
+| `S3__ENDPOINT_URL` | `http://localhost:9000` | S3 / MinIO endpoint |
+| `S3__BUCKET` | `whisperx-audio` | Bucket for audio uploads |
+| `MINIO_ROOT_USER` | `minioadmin` | MinIO root user — **change before deploying** |
+| `MINIO_ROOT_PASSWORD` | `minioadmin` | MinIO root password — **change before deploying** |
+
+## API Reference
 
 ### `POST /v1/audio/transcriptions`
-https://platform.openai.com/docs/api-reference/audio/createTranscription
 
-**Parameters**:
-- `file`: The audio file to transcribe.
-- `model (str)`: Model name for the configured transcription backend. If `whisper-1` is provided, it is replaced with the configured default transcription model.
-- `language (str | null)`: Language code for transcription. Default is `config.default_language`.
-- `prompt (str | null)`: Optional transcription prompt. Default is `null`.
-- `response_format (str)`: One of `text`, `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud`. Default is `config.default_response_format`.
-- `temperature (float)`: Temperature setting for transcription. Default is `0.0`.
-- `timestamp_granularities[] (list[str])`: Timestamp granularity values (`segment`, `word`). Default is `["segment"]`.
-- `stream (bool)`: OpenAI-compatible streaming flag. Currently accepted but not used by the server. Default is `False`.
-- `hotwords (str | null)`: Optional hotwords for transcription. Default is `null`.
-- `suppress_numerals (bool)`: Suppress numerals in transcription. Default is `True`.
-- `highlight_words (bool)`: Highlight words in subtitle-style outputs (`vtt`, `srt`). Default is `False`.
-- `align (bool)`: Enable transcription timing alignment. Default is `True`.
-- `diarize (bool)`: Enable speaker diarization. Default is `False`.
-- `speaker_embeddings (bool)`: Include speaker embeddings during diarization flow. Default is `False`.
-- `chunk_size (int)`: Chunk size (seconds) for VAD segment merging. Default is `config.whisper.chunk_size`.
-- `batch_size (int)`: Batch size used during inference. Default is `config.whisper.batch_size`.
+Transcribe an audio file. Compatible with the [OpenAI transcription API](https://platform.openai.com/docs/api-reference/audio/createTranscription).
 
-**Returns**: Transcription output in the requested `response_format`:
-- `json`: JSON object with `text`.
-- `verbose_json`: Full transcript JSON object.
-- `vtt_json`: Full transcript JSON object plus `vtt_text`.
-- `text`, `srt`, `vtt`, `aud`: Plain text response body.
+**Form parameters**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `file` | file | — | Audio file (required) |
+| `model` | string | config default | Model name. `whisper-1` is aliased to the configured default. |
+| `language` | string | config default | ISO-639-1 language code. Auto-detected if omitted. |
+| `prompt` | string | — | Optional context/hotwords hint |
+| `response_format` | string | `json` | `text`, `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud` |
+| `temperature` | float | `0.0` | Sampling temperature |
+| `timestamp_granularities[]` | list | `["segment"]` | `segment`, `word` |
+| `align` | bool | `true` | Enable word-level alignment (required for subtitle formats) |
+| `diarize` | bool | `false` | Enable speaker diarization (requires `align=true`) |
+| `speaker_embeddings` | bool | `false` | Include speaker embeddings in diarization output |
+| `highlight_words` | bool | `false` | Highlight words in `vtt`/`srt` output |
+| `suppress_numerals` | bool | `true` | Spell out numbers |
+| `hotwords` | string | — | Comma-separated hotwords to bias toward |
+| `batch_size` | int | config default | Inference batch size |
+| `chunk_size` | int | config default | VAD chunk size in seconds |
+
+**Response formats**
+
+| Format | Content-Type | Body |
+|---|---|---|
+| `json` | `application/json` | `{"text": "..."}` |
+| `verbose_json` | `application/json` | Full transcript with segments and timestamps |
+| `vtt_json` | `application/json` | `verbose_json` + `"vtt_text"` field |
+| `text` / `srt` / `aud` | `text/plain` | Raw text / subtitle file |
+| `vtt` | `text/vtt` | WebVTT subtitle file |
+
+---
 
 ### `POST /v1/audio/translations`
-https://platform.openai.com/docs/api-reference/audio/createTranslation
 
-**Parameters**:
-- `file`: The audio file to translate.
-- `model (str)`: Model name for the configured transcription backend. If `whisper-1` is provided, it is replaced with the configured default transcription model.
-- `prompt (str)`: Optional translation prompt. Default is an empty string.
-- `response_format (str)`: One of `text`, `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud`. Default is `config.default_response_format`.
-- `temperature (float)`: Temperature setting for translation. Default is `0.0`.
-- `chunk_size (int)`: Chunk size (seconds) for VAD segment merging. Default is `config.whisper.chunk_size`.
-- `batch_size (int)`: Batch size used during inference. Default is `config.whisper.batch_size`.
+Translate audio to English. Same parameters as `/v1/audio/transcriptions`, minus `language`, `align`, `diarize`, and diarization-related fields.
 
-**Returns**: Translation output in the requested `response_format` (same response behavior as `/v1/audio/transcriptions`).
+---
 
 ### `GET /healthcheck`
-Returns current API health status as JSON: `{"status": "healthy"}`.
 
-### `GET /models/list`
-Lists loaded transcription models.
+Returns `{"status": "healthy"}`. Not protected by API key auth.
 
-### `POST /models/unload`
-Unloads a transcription model from cache.
+---
 
-**Parameters**:
-- `model (str)`: Model name to unload.
+### Model management
 
-### `POST /models/load`
-Loads a transcription model into cache.
+| Endpoint | Description |
+|---|---|
+| `GET /models/list` | List loaded transcription models |
+| `POST /models/load` | Load a model (`model` param) |
+| `POST /models/unload` | Unload a model (`model` param) |
+| `GET /align_models/list` | List loaded alignment models |
+| `POST /align_models/load` | Load an alignment model (`language` param) |
+| `POST /align_models/unload` | Unload an alignment model (`language` param) |
+| `GET /diarize_models/list` | List loaded diarization models |
+| `POST /diarize_models/load` | Load a diarization model (`model` param) |
+| `POST /diarize_models/unload` | Unload a diarization model (`model` param) |
 
-**Parameters**:
-- `model (str)`: Model name to load.
+## Pluggable Backends
 
-### `GET /align_models/list`
-Lists loaded alignment models.
-
-### `POST /align_models/unload`
-Unloads an alignment model.
-
-**Parameters**:
-- `language (str)`: Language code of the alignment model to unload.
-
-### `POST /align_models/load`
-Loads an alignment model.
-
-**Parameters**:
-- `language (str)`: Language code of the alignment model to load.
-
-### `GET /diarize_models/list`
-Lists loaded diarization models.
-
-### `POST /diarize_models/unload`
-Unloads a diarization model.
-
-**Parameters**:
-- `model (str)`: Diarization model name to unload.
-
-### `POST /diarize_models/load`
-Loads a diarization model.
-
-**Parameters**:
-- `model (str)`: Diarization model name to load.
-
-### Backend Selection
-
-You can define default backend per pipeline stage through environment variables:
+Each pipeline stage (transcription, alignment, diarization) can use a different backend. Set the active backend via environment variables:
 
 ```bash
 BACKENDS__TRANSCRIPTION=whisperx
@@ -109,33 +143,21 @@ BACKENDS__ALIGNMENT=whisperx
 BACKENDS__DIARIZATION=whisperx
 ```
 
-By default, only the `whisperx` backend is registered. Additional backends can be added and combined per stage.
+Only the `whisperx` backend ships by default. Custom backends can be registered via the backend registry at `src/whisperx_api_server/backends/`.
 
-Model management endpoints (`/models/*`, `/align_models/*`, `/diarize_models/*`) operate through the configured stage backends.
+## Compose Files
 
-### Running the API
+| File | Purpose |
+|---|---|
+| `compose.yaml` | Standalone server — use `--profile cuda` or `--profile cpu` |
+| `compose-kafka.yaml` | Distributed stack — API server + Kafka + MinIO + workers via `--profile cuda` / `--profile cpu` |
 
-**With Docker**:
-
-For CPU:
-```bash
-    docker compose build whisperx-api-server-cpu
-
-    docker compose up whisperx-api-server-cpu
-```
-
-For CUDA (GPU):
-```bash
-    docker compose build whisperx-api-server-cuda
-
-    docker compose up whisperx-api-server-cuda
-
-```
+Workers are opt-in via profiles so `docker compose up` never accidentally starts a GPU process on a machine that doesn't have one.
 
 ## Contributing
 
-Feel free to submit issues, fork the repository, and send pull requests to contribute to the project.
+Issues, forks, and pull requests are welcome.
 
 ## License
 
-This project is licensed under the GNU GENERAL PUBLIC LICENSE Version 3. See the `LICENSE` file for details.
+GNU General Public License v3.0 — see [`LICENSE`](LICENSE) for details.

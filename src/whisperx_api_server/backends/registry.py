@@ -1,4 +1,5 @@
 import importlib
+import re
 import threading
 from typing import Any
 
@@ -14,6 +15,8 @@ from .contracts import (
 
 config = get_config()
 
+_VALID_BACKEND_NAME = re.compile(r"^[a-z0-9_]+$")
+
 _transcription_backends: dict[str, TranscriptionBackend] = {}
 _alignment_backends: dict[str, AlignmentBackend] = {}
 _diarization_backends: dict[str, DiarizationBackend] = {}
@@ -25,6 +28,10 @@ def _normalize_backend_name(backend_name: str, stage: str) -> str:
     normalized = backend_name.strip().lower()
     if not normalized:
         raise BackendSelectionError(f"{stage} backend name cannot be empty.")
+    if not _VALID_BACKEND_NAME.match(normalized):
+        raise BackendSelectionError(
+            f"Invalid {stage} backend name {normalized!r}: only lowercase letters, digits, and underscores are allowed."
+        )
     return normalized
 
 

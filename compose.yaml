@@ -1,11 +1,16 @@
 services:
   whisperx-api-server-cuda:
+    profiles: [cuda]
     image: whisperx-api-server-cuda
     build:
       context: .
       dockerfile: Dockerfile.cuda
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail http://localhost:8000/healthcheck || exit 1"]
+      test: ["CMD-SHELL", "curl --fail --connect-timeout 5 http://localhost:8000/healthcheck || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     command: uvicorn --factory whisperx_api_server.main:create_app
     ports:
       - 8000:8000
@@ -20,12 +25,17 @@ services:
               count: 1
               capabilities: [gpu]
   whisperx-api-server-cpu:
+    profiles: [cpu]
     image: whisperx-api-server-cpu
     build:
       context: .
       dockerfile: Dockerfile.cpu
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail http://localhost:8000/healthcheck || exit 1"]
+      test: ["CMD-SHELL", "curl --fail --connect-timeout 5 http://localhost:8000/healthcheck || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     command: uvicorn --factory whisperx_api_server.main:create_app
     ports:
       - 8000:8000

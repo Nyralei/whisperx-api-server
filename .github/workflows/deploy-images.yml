@@ -14,11 +14,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: cuda
-            file: ./Dockerfile.cuda
           - target: cpu
             file: ./Dockerfile.cpu
-            
+            image: whisperx-api-server
+            build_args: ""
+          - target: cuda
+            file: ./Dockerfile.cuda
+            image: whisperx-api-server
+            build_args: ""
+          - target: cpu-kafka
+            file: ./Dockerfile.cpu
+            image: whisperx-api-server
+            build_args: "EXTRA_EXTRAS=--extra kafka"
+          - target: cuda-kafka
+            file: ./Dockerfile.cuda
+            image: whisperx-api-server
+            build_args: "EXTRA_EXTRAS=--extra kafka"
+          - target: worker-cpu
+            file: ./Dockerfile.worker-cpu
+            image: whisperx-worker
+            build_args: ""
+          - target: worker-cuda
+            file: ./Dockerfile.worker-cuda
+            image: whisperx-worker
+            build_args: ""
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -43,7 +63,7 @@ jobs:
           COMMIT_HASH=$(git rev-parse --short HEAD)
           VERSION="${EPOCH_TIME}-${COMMIT_HASH}"
         fi
-        
+
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Build and push ${{ matrix.target }} image
@@ -51,7 +71,8 @@ jobs:
       with:
         context: .
         file: ${{ matrix.file }}
+        build-args: ${{ matrix.build_args }}
         cache-from: type=gha,scope=${{ matrix.target }}
         cache-to: type=gha,mode=max,scope=${{ matrix.target }}
         push: true
-        tags: ghcr.io/nyralei/whisperx-api-server:${{ steps.get_version.outputs.version }}-${{ matrix.target }}
+        tags: ghcr.io/nyralei/${{ matrix.image }}:${{ steps.get_version.outputs.version }}-${{ matrix.target }}

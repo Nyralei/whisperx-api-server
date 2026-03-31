@@ -1,6 +1,6 @@
 [project]
 name = "whisperx-api-server"
-version = "1.1.5.1"
+version = "1.2.0.0"
 description = "FastAPI server for WhisperX transcription with OpenAI-like API"
 readme = "README.md"
 requires-python = ">=3.10, <3.14"
@@ -25,6 +25,11 @@ cuda = [
     "torchaudio~=2.8.0",
     "torchcodec~=0.7.0",
     "onnxruntime~=1.21.0"
+]
+kafka = [
+    "aiokafka>=0.11.0",
+    "aiobotocore>=2.15.0",
+    "aiofiles>=24.1.0",
 ]
 
 [tool.uv]

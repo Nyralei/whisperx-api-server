@@ -163,7 +163,11 @@ class WhisperConfig(BaseModel):
     cpu_threads: int = Field(default=0)
     num_workers: int = Field(default=1)
     vad_method: VadMethod = Field(default=VadMethod.PYANNOTE)
+    # Custom VAD model instance to assign directly. If set, vad_method is ignored.
     vad_model: str = Field(default=None)
+    # Overrides for VAD defaults: chunk_size (s), vad_onset (0.0–1.0), vad_offset (0.0–1.0).
+    # Defaults: {"chunk_size": 30, "vad_onset": 0.500, "vad_offset": 0.363}
+    # Example: WHISPER__VAD_OPTIONS='{"vad_onset": 0.4, "vad_offset": 0.3}'
     vad_options: dict = Field(default=None)
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
@@ -174,7 +178,15 @@ class WhisperConfig(BaseModel):
 
 
 class AlignConfig(BaseModel):
+    # Override alignment models per language. Keys are ISO-639-1 language codes;
+    # values are Hugging Face model names or local paths.
+    # The special key "multilingual" applies one model to all languages regardless of code.
+    # Example: ALIGNMENT__MODELS='{"ru": "bond005/wav2vec2-large-ru-golos", "multilingual": "voidful/wav2vec2-xlsr-multilingual-56"}'
     models: dict = Field(default_factory=dict)
+    # Language codes to keep loaded in the alignment cache simultaneously.
+    # Any model for a language not in this list is evicted when a new language is loaded.
+    # Empty list = keep all loaded (unbounded cache).
+    # Example: ALIGNMENT__WHITELIST='["ru", "en"]'
     whitelist: list = Field(default_factory=list)
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
@@ -194,6 +206,36 @@ class BackendsConfig(BaseModel):
     diarization: str = Field(default="whisperx")
 
 
+class DistributedMode(str, Enum):
+    DIRECT = "direct"
+    KAFKA = "kafka"
+
+
+class KafkaConfig(BaseModel):
+    bootstrap_servers: str = Field(default="localhost:9092")
+    request_topic: str = Field(default="transcription-requests")
+    reply_topic: str = Field(default="transcription-replies")
+    consumer_group_worker: str = Field(default="whisperx-worker")
+    reply_timeout_seconds: float = Field(default=3600.0)
+    max_poll_interval_ms: int = Field(default=600_000)
+    # Maximum number of jobs waiting for a reply (0 = unlimited).
+    # Requests beyond this limit are rejected with HTTP 503.
+    max_pending_jobs: int = Field(default=0)
+    # Must match broker KAFKA_MESSAGE_MAX_BYTES (default 50 MiB).
+    max_message_bytes: int = Field(default=52428800)
+
+
+class S3Config(BaseModel):
+    endpoint_url: str = Field(default="http://localhost:9000")
+    access_key_id: str = Field(default="minioadmin")
+    secret_access_key: str = Field(default="minioadmin", repr=False)
+    bucket: str = Field(default="whisperx-audio")
+    region: str = Field(default="us-east-1")
+    delete_after_download: bool = Field(default=True)
+    # Lifecycle expiry for objects in the bucket (days). 0 = disabled.
+    object_expiry_days: int = Field(default=1)
+
+
 class Config(BaseSettings):
     """
     Configuration for the application. Values can be set via environment variables.
@@ -207,7 +249,7 @@ class Config(BaseSettings):
 
     model_config = SettingsConfigDict(env_nested_delimiter="__")
 
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
 
     api_keys_file: str | None = None
 
@@ -233,4 +275,16 @@ class Config(BaseSettings):
 
     audio_cleanup: bool = True
 
-    hf_token: str = Field(alias="HF_TOKEN", default="")
+    # Maximum number of concurrent GPU transcriptions (0 = unlimited, only applies when CUDA is available)
+    max_concurrent_transcriptions: int = 1
+
+    # Thread-pool workers for async I/O (audio load/save)
+    io_executor_workers: int = 4
+
+    hf_token: str = Field(alias="HF_TOKEN", default="", repr=False)
+
+    mode: DistributedMode = Field(default=DistributedMode.DIRECT)
+
+    kafka: KafkaConfig = KafkaConfig()
+
+    s3: S3Config = S3Config()

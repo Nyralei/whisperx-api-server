@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 import uuid
 from fastapi import (
@@ -8,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from whisperx_api_server.config import DistributedMode
 from whisperx_api_server.dependencies import ApiKeyDependency, get_config
 from whisperx_api_server.logger import setup_logger
 
@@ -43,33 +46,60 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
-    selected_backends = resolve_stage_backends()
-    logger.info(
-        f"Configured stage backends: transcription={selected_backends.transcription}, "
-        f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
-    )
-    try:
-        transcription_backend = get_transcription_backend(
-            selected_backends.transcription)
-        await transcription_backend.preload_default()
-    except Exception:
-        logger.exception(
-            "Failed to preload transcription backend; will try to load on demand")
-    try:
-        alignment_backend = get_alignment_backend(selected_backends.alignment)
-        await alignment_backend.preload_default()
-    except Exception:
-        logger.exception(
-            "Failed to preload alignment backend; will try to load on demand")
-    try:
-        diarization_backend = get_diarization_backend(
-            selected_backends.diarization)
-        await diarization_backend.preload_default()
-    except Exception:
-        logger.exception(
-            "Failed to preload diarization backend; will try to load on demand")
+    config = get_config()
 
-    yield
+    if config.mode == DistributedMode.KAFKA:
+        from whisperx_api_server import s3_client, kafka_client
+        await s3_client.init_client(config.s3)
+        await kafka_client.start(config.kafka)
+
+        def _on_reply_task_done(task: asyncio.Task) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error(
+                    "Kafka reply consumer died unexpectedly — pending jobs will time out",
+                    exc_info=task.exception(),
+                )
+
+        reply_task = asyncio.create_task(
+            kafka_client.reply_consumer_loop(config.kafka),
+            name="kafka-reply-consumer",
+        )
+        reply_task.add_done_callback(_on_reply_task_done)
+        logger.info("Kafka mode: S3 and Kafka clients started")
+        yield
+        reply_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await reply_task
+        await kafka_client.stop()
+        await s3_client.close_client()
+    else:
+        selected_backends = resolve_stage_backends()
+        logger.info(
+            f"Configured stage backends: transcription={selected_backends.transcription}, "
+            f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
+        )
+        try:
+            transcription_backend = get_transcription_backend(
+                selected_backends.transcription)
+            await transcription_backend.preload_default()
+        except Exception:
+            logger.exception(
+                "Failed to preload transcription backend; will try to load on demand")
+        try:
+            alignment_backend = get_alignment_backend(
+                selected_backends.alignment)
+            await alignment_backend.preload_default()
+        except Exception:
+            logger.exception(
+                "Failed to preload alignment backend; will try to load on demand")
+        try:
+            diarization_backend = get_diarization_backend(
+                selected_backends.diarization)
+            await diarization_backend.preload_default()
+        except Exception:
+            logger.exception(
+                "Failed to preload diarization backend; will try to load on demand")
+        yield
 
 
 def create_app() -> FastAPI:

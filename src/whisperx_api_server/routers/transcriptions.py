@@ -1,5 +1,4 @@
 import logging
-import uuid
 from .models import handle_default_openai_model
 from fastapi import (
     APIRouter,
@@ -10,19 +9,20 @@ from fastapi import (
     status
 )
 from fastapi.responses import Response
-from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Literal, Annotated
 from pydantic import AfterValidator
 import time
 
 
 import whisperx_api_server.transcriber as transcriber
+from whisperx_api_server.transcriber import QueueFullError
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.backends.registry import (
     get_default_transcription_model_name,
 )
 from whisperx_api_server.config import (
+    DistributedMode,
     Language,
     ResponseFormat,
 )
@@ -37,15 +37,6 @@ router = APIRouter()
 ModelName = Annotated[str, AfterValidator(handle_default_openai_model)]
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-
 def get_timestamp_granularities(
     timestamp_granularities: list[Literal["segment", "word"]] | None,
 ) -> list[Literal["segment", "word"]]:
@@ -58,9 +49,11 @@ def get_timestamp_granularities(
     ]
     if timestamp_granularities is None:
         return ["segment"]
-    assert timestamp_granularities in TIMESTAMP_GRANULARITIES_COMBINATIONS, (
-        f"{timestamp_granularities} is not a valid value for `timestamp_granularities[]`."
-    )
+    if timestamp_granularities not in TIMESTAMP_GRANULARITIES_COMBINATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{timestamp_granularities} is not a valid value for `timestamp_granularities[]`.",
+        )
     return timestamp_granularities
 
 
@@ -97,7 +90,8 @@ Returns:
 async def transcribe_audio(
     request: Request,
     file: UploadFile,
-    model: Annotated[ModelName, Form()] = get_default_transcription_model_name(),
+    model: Annotated[ModelName,
+                     Form()] = get_default_transcription_model_name(),
     language: Annotated[Language, Form()] = config.default_language,
     prompt: Annotated[str, Form()] = None,
     response_format: Annotated[ResponseFormat,
@@ -142,13 +136,13 @@ async def transcribe_audio(
     if not align:
         if response_format in ('vtt', 'srt', 'aud', 'vtt_json'):
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Subtitles format ('vtt', 'srt', 'aud', 'vtt_json') requires alignment to be enabled."
             )
 
         if diarize:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Diarization requires alignment to be enabled."
             )
 
@@ -163,18 +157,40 @@ async def transcribe_audio(
     }
 
     try:
-        transcription = await transcriber.transcribe(
-            audio_file=file,
-            batch_size=batch_size,
-            asr_options=asr_options,
-            language=language,
-            model_name=model,
-            align=align,
-            diarize=diarize,
-            speaker_embeddings=speaker_embeddings,
-            chunk_size=chunk_size,
-            request_id=request_id,
-        )
+        if config.mode == DistributedMode.KAFKA:
+            params = {
+                "model_name": model,
+                "language": language.value if language else None,
+                "task": "transcribe",
+                "align": align,
+                "diarize": diarize,
+                "speaker_embeddings": speaker_embeddings,
+                "batch_size": batch_size,
+                "chunk_size": chunk_size,
+                "asr_options": asr_options,
+            }
+            transcription = await transcriber.transcribe_via_kafka(
+                audio_file=file, params=params, request_id=request_id
+            )
+        else:
+            transcription = await transcriber.transcribe(
+                audio_file=file,
+                batch_size=batch_size,
+                asr_options=asr_options,
+                language=language,
+                model_name=model,
+                align=align,
+                diarize=diarize,
+                speaker_embeddings=speaker_embeddings,
+                chunk_size=chunk_size,
+                request_id=request_id,
+            )
+    except QueueFullError as e:
+        logger.warning(f"Request ID: {request_id} - Queue full: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is busy, please try again later."
+        ) from e
     except Exception as e:
         logger.exception(
             f"Request ID: {request_id} - Transcription failed: {e}")
@@ -214,7 +230,8 @@ Returns:
 async def translate_audio(
     request: Request,
     file: UploadFile,
-    model: Annotated[ModelName, Form()] = get_default_transcription_model_name(),
+    model: Annotated[ModelName,
+                     Form()] = get_default_transcription_model_name(),
     prompt: Annotated[str, Form()] = "",
     response_format: Annotated[ResponseFormat,
                                Form()] = config.default_response_format,
@@ -239,15 +256,37 @@ async def translate_audio(
     }
 
     try:
-        translation = await transcriber.transcribe(
-            audio_file=file,
-            batch_size=batch_size,
-            asr_options=asr_options,
-            model_name=model,
-            chunk_size=chunk_size,
-            request_id=request_id,
-            task="translate",
-        )
+        if config.mode == DistributedMode.KAFKA:
+            params = {
+                "model_name": model,
+                "language": None,
+                "task": "translate",
+                "align": False,
+                "diarize": False,
+                "speaker_embeddings": False,
+                "batch_size": batch_size,
+                "chunk_size": chunk_size,
+                "asr_options": asr_options,
+            }
+            translation = await transcriber.transcribe_via_kafka(
+                audio_file=file, params=params, request_id=request_id
+            )
+        else:
+            translation = await transcriber.transcribe(
+                audio_file=file,
+                batch_size=batch_size,
+                asr_options=asr_options,
+                model_name=model,
+                chunk_size=chunk_size,
+                request_id=request_id,
+                task="translate",
+            )
+    except QueueFullError as e:
+        logger.warning(f"Request ID: {request_id} - Queue full: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is busy, please try again later."
+        ) from e
     except Exception as e:
         logger.exception(f"Request ID: {request_id} - Translation failed: {e}")
         raise HTTPException(

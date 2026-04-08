@@ -37,7 +37,8 @@ async def stop() -> None:
 async def submit_job(
     job_id: str, s3_key: str, filename: str, params: dict[str, Any]
 ) -> asyncio.Future:
-    assert _producer is not None and _config is not None, "Kafka producer not initialized"
+    if _producer is None or _config is None:
+        raise RuntimeError("Kafka producer not initialized")
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()
     _pending_jobs[job_id] = future

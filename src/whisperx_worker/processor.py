@@ -128,6 +128,10 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
             f"Job {job_id}: transcription took {profile['transcribe']:.2f} seconds")
 
         if align or diarize:
+            if alignment_backend is None:
+                raise RuntimeError(
+                    "Alignment backend is not initialized but alignment or diarization was requested"
+                )
             t0 = time.perf_counter()
             result = await alignment_backend.align(
                 result=result, audio=audio, request_id=job_id

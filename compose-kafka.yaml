@@ -1,3 +1,108 @@
+# Distributed (Kafka) mode — API publishes jobs to Kafka, workers consume.
+#
+# Profiles → modes:
+#   cuda          — CUDA worker (api: whisperx-api:kafka,         worker: whisperx-worker:cuda-kafka)
+#   cpu           — CPU  worker (api: whisperx-api:kafka,         worker: whisperx-worker:cpu-kafka)
+#   cuda-observe  — CUDA worker + Prometheus
+#                   (api: whisperx-api:kafka-metrics, worker: whisperx-worker:cuda-kafka-metrics)
+#   cpu-observe   — CPU  worker + Prometheus
+#                   (api: whisperx-api:kafka-metrics, worker: whisperx-worker:cpu-kafka-metrics)
+#
+# In Kafka mode the API is a CPU-only router (no model load) regardless of which
+# worker compute backend is selected.
+
+x-api-base: &api-base
+  build:
+    context: .
+    dockerfile: Dockerfile.cpu
+    args:
+      UV_EXTRA_ARGS: "--extra kafka"
+  depends_on:
+    kafka:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+  command: uvicorn --factory whisperx_api_server.main:create_app
+  ports:
+    - "8000:8000"
+  environment: &api-env
+    MODE: kafka
+    KAFKA__BOOTSTRAP_SERVERS: kafka:9092
+    S3__ENDPOINT_URL: http://minio:9000
+    S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+    S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    S3__BUCKET: whisperx-audio
+    METRICS_ENABLED: "false"
+  volumes:
+    - hugging_face_cache:/home/ubuntu/.cache/huggingface
+    - torch_cache:/home/ubuntu/.cache/torch
+  healthcheck:
+    test: ["CMD-SHELL", "curl --fail --connect-timeout 5 http://localhost:8000/healthcheck || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 60s
+
+x-worker-cuda-base: &worker-cuda-base
+  build:
+    context: .
+    dockerfile: Dockerfile.worker-cuda
+  depends_on:
+    kafka:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+  ports:
+    - "9091:9091"
+  environment: &worker-env
+    MODE: kafka
+    KAFKA__BOOTSTRAP_SERVERS: kafka:9092
+    S3__ENDPOINT_URL: http://minio:9000
+    S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+    S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    S3__BUCKET: whisperx-audio
+    METRICS_ENABLED: "false"
+  volumes:
+    - hugging_face_cache:/home/ubuntu/.cache/huggingface
+    - torch_cache:/home/ubuntu/.cache/torch
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+x-worker-cpu-base: &worker-cpu-base
+  build:
+    context: .
+    dockerfile: Dockerfile.worker-cpu
+  depends_on:
+    kafka:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+  ports:
+    - "9091:9091"
+  environment: *worker-env
+  volumes:
+    - hugging_face_cache:/home/ubuntu/.cache/huggingface
+    - torch_cache:/home/ubuntu/.cache/torch
+
+x-prometheus: &prometheus-base
+  image: prom/prometheus:v3.11.2
+  ports:
+    - "9090:9090"
+  command:
+    - '--config.file=/etc/prometheus/prometheus.yml'
+    - '--storage.tsdb.path=/prometheus'
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O - http://localhost:9090/-/healthy || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
+
 services:
   kafka:
     image: apache/kafka:4.2.0
@@ -44,88 +149,71 @@ services:
       retries: 5
       start_period: 10s
 
-  whisperx-api-server:
-    image: whisperx-api-server-cpu
+  whisperx-api:
+    <<: *api-base
+    profiles: [cuda, cpu]
+    image: whisperx-api:kafka
+
+  whisperx-api-metrics:
+    <<: *api-base
+    profiles: [cuda-observe, cpu-observe]
+    image: whisperx-api:kafka-metrics
     build:
       context: .
       dockerfile: Dockerfile.cpu
       args:
-        UV_EXTRA_ARGS: "--extra kafka"
-    depends_on:
-      kafka:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    command: uvicorn --factory whisperx_api_server.main:create_app
-    ports:
-      - "8000:8000"
+        UV_EXTRA_ARGS: "--extra kafka --extra metrics"
     environment:
-      MODE: kafka
-      KAFKA__BOOTSTRAP_SERVERS: kafka:9092
-      S3__ENDPOINT_URL: http://minio:9000
-      S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      S3__BUCKET: whisperx-audio
-    volumes:
-      - hugging_face_cache:/home/ubuntu/.cache/huggingface
-      - torch_cache:/home/ubuntu/.cache/torch
-    healthcheck:
-      test: ["CMD-SHELL", "curl --fail --connect-timeout 5 http://localhost:8000/healthcheck || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      <<: *api-env
+      METRICS_ENABLED: "true"
 
   whisperx-worker-cuda:
+    <<: *worker-cuda-base
     profiles: [cuda]
-    image: whisperx-worker-cuda
+    image: whisperx-worker:cuda-kafka
+
+  whisperx-worker-cpu:
+    <<: *worker-cpu-base
+    profiles: [cpu]
+    image: whisperx-worker:cpu-kafka
+
+  whisperx-worker-cuda-metrics:
+    <<: *worker-cuda-base
+    profiles: [cuda-observe]
+    image: whisperx-worker:cuda-kafka-metrics
     build:
       context: .
       dockerfile: Dockerfile.worker-cuda
-    depends_on:
-      kafka:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+      args:
+        UV_EXTRA_ARGS: "--extra metrics"
     environment:
-      MODE: kafka
-      KAFKA__BOOTSTRAP_SERVERS: kafka:9092
-      S3__ENDPOINT_URL: http://minio:9000
-      S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      S3__BUCKET: whisperx-audio
-    volumes:
-      - hugging_face_cache:/home/ubuntu/.cache/huggingface
-      - torch_cache:/home/ubuntu/.cache/torch
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      <<: *worker-env
+      METRICS_ENABLED: "true"
 
-  whisperx-worker-cpu:
-    profiles: [cpu]
-    image: whisperx-worker-cpu
+  whisperx-worker-cpu-metrics:
+    <<: *worker-cpu-base
+    profiles: [cpu-observe]
+    image: whisperx-worker:cpu-kafka-metrics
     build:
       context: .
       dockerfile: Dockerfile.worker-cpu
-    depends_on:
-      kafka:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+      args:
+        UV_EXTRA_ARGS: "--extra metrics"
     environment:
-      MODE: kafka
-      KAFKA__BOOTSTRAP_SERVERS: kafka:9092
-      S3__ENDPOINT_URL: http://minio:9000
-      S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      S3__BUCKET: whisperx-audio
+      <<: *worker-env
+      METRICS_ENABLED: "true"
+
+  prometheus-cuda:
+    <<: *prometheus-base
+    profiles: [cuda-observe]
     volumes:
-      - hugging_face_cache:/home/ubuntu/.cache/huggingface
-      - torch_cache:/home/ubuntu/.cache/torch              
+      - ./monitoring/prometheus/prometheus-kafka-cuda.yml:/etc/prometheus/prometheus.yml:ro
+
+  prometheus-cpu:
+    <<: *prometheus-base
+    profiles: [cpu-observe]
+    volumes:
+      - ./monitoring/prometheus/prometheus-kafka-cpu.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
   minio_data:

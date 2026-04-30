@@ -2,15 +2,17 @@ import asyncio
 import json
 import logging
 import socket
+import time
 from typing import Any
 
 from whisperx_api_server.config import KafkaConfig
+from whisperx_api_server.observability import kafka as _kafka
 
 logger = logging.getLogger(__name__)
 
 _producer = None
 _config: KafkaConfig | None = None
-_pending_jobs: dict[str, asyncio.Future] = {}
+_pending_jobs: dict[str, tuple[asyncio.Future, float]] = {}
 
 
 async def start(cfg: KafkaConfig) -> None:
@@ -41,7 +43,7 @@ async def submit_job(
         raise RuntimeError("Kafka producer not initialized")
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()
-    _pending_jobs[job_id] = future
+    _pending_jobs[job_id] = (future, time.monotonic())
 
     event = {
         "job_id": job_id,
@@ -91,16 +93,22 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
             if not job_id:
                 continue
 
-            future = _pending_jobs.pop(job_id, None)
-            if future is None or future.done():
+            entry = _pending_jobs.pop(job_id, None)
+            if entry is None:
+                continue
+            future, submit_time = entry
+            if future.done():
                 continue
 
+            duration = time.monotonic() - submit_time
             if event.get("status") == "ok":
                 future.set_result(event["result"])
+                _kafka.job_duration.labels(status="ok").observe(duration)
                 logger.debug(f"Job {job_id}: resolved from reply")
             else:
                 future.set_exception(RuntimeError(
                     event.get("error", "worker error")))
+                _kafka.job_duration.labels(status="error").observe(duration)
                 logger.warning(
                     f"Job {job_id}: failed with error: {event.get('error')}")
     finally:

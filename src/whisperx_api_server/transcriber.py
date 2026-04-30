@@ -29,6 +29,8 @@ from whisperx_api_server.backends.registry import (
     get_transcription_backend,
     resolve_stage_backends,
 )
+from whisperx_api_server.observability import pipeline as _pipe
+from whisperx_api_server.observability import kafka as _kafka
 
 logger = logging.getLogger(__name__)
 
@@ -179,12 +181,19 @@ async def transcribe(
         profile["upload_save"] = time.perf_counter() - t0
         logger.info(
             f"Request ID: {request_id} - Saving uploaded file took {profile['upload_save']:.2f} seconds")
+        _pipe.stage_duration.labels(
+            stage="upload_save").observe(profile["upload_save"])
 
         if concurrency_sem:
+            _sem_t0 = time.perf_counter()
             await concurrency_sem.acquire()
             semaphore_acquired = True
+            _sem_elapsed = time.perf_counter() - _sem_t0
             logger.debug(
                 f"Request ID: {request_id} - Acquired GPU concurrency semaphore")
+        else:
+            _sem_elapsed = 0.0
+        _pipe.semaphore_wait.observe(_sem_elapsed)
 
         selected_backends = resolve_stage_backends()
         transcription_stage_backend = get_transcription_backend(
@@ -211,6 +220,9 @@ async def transcribe(
         profile["audio_load"] = time.perf_counter() - t0
         logger.info(
             f"Request ID: {request_id} - Loading audio took {profile['audio_load']:.2f} seconds")
+        _pipe.stage_duration.labels(
+            stage="audio_load").observe(profile["audio_load"])
+        audio_duration_seconds = len(audio) / 16000.0
 
         if file_path and os.path.exists(file_path):
             try:
@@ -233,6 +245,11 @@ async def transcribe(
         profile["transcribe"] = time.perf_counter() - t0
         logger.info(
             f"Request ID: {request_id} - Transcription took {profile['transcribe']:.2f} seconds")
+        _pipe.stage_duration.labels(
+            stage="transcribe").observe(profile["transcribe"])
+        _pipe.realtime_factor.labels(model=model_name, stage="transcribe").observe(
+            profile["transcribe"] / audio_duration_seconds
+        )
 
         if align or diarize:
             if alignment_stage_backend is None:
@@ -246,6 +263,11 @@ async def transcribe(
             profile["align"] = time.perf_counter() - t0
             logger.debug(
                 f"Request ID: {request_id} - Alignment took {profile['align']:.2f} seconds")
+            _pipe.stage_duration.labels(
+                stage="align").observe(profile["align"])
+            _pipe.realtime_factor.labels(model=model_name, stage="align").observe(
+                profile["align"] / audio_duration_seconds
+            )
 
         if diarize:
             if diarization_stage_backend is None:
@@ -260,6 +282,11 @@ async def transcribe(
             profile["diarize"] = time.perf_counter() - t0
             logger.debug(
                 f"Request ID: {request_id} - Diarization took {profile['diarize']:.2f} seconds")
+            _pipe.stage_duration.labels(
+                stage="diarize").observe(profile["diarize"])
+            _pipe.realtime_factor.labels(model=model_name, stage="diarize").observe(
+                profile["diarize"] / audio_duration_seconds
+            )
 
         t0 = time.perf_counter()
         result = _finalize_text(result, align or diarize)
@@ -305,6 +332,7 @@ async def transcribe_via_kafka(
 ) -> dict[str, Any]:
     max_pending = config.kafka.max_pending_jobs
     if max_pending > 0 and len(kafka_client._pending_jobs) >= max_pending:
+        _kafka.queue_rejected_total.inc()
         raise QueueFullError(
             f"Too many pending jobs ({len(kafka_client._pending_jobs)}/{max_pending})"
         )
@@ -323,6 +351,7 @@ async def transcribe_via_kafka(
         return result
     except asyncio.TimeoutError:
         kafka_client._pending_jobs.pop(request_id, None)
+        _kafka.job_timeout_total.inc()
         logger.error(
             f"Request ID: {request_id} - Timed out waiting for worker reply")
         raise TimeoutError(

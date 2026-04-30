@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "whisperx-api"
+    static_configs:
+      - targets:
+          - "whisperx-api-metrics:8000"
+        labels:
+          service: "whisperx-api"
+
+  - job_name: "whisperx-worker"
+    static_configs:
+      - targets:
+          - "whisperx-worker-cuda-metrics:9091"
+        labels:
+          service: "whisperx-worker"
+          compute: "cuda"

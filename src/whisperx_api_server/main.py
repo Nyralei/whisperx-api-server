@@ -21,8 +21,8 @@ from whisperx_api_server.backends.registry import (
     resolve_stage_backends,
 )
 
-from whisperx_api_server.routers.misc import (
-    router as misc_router,
+from whisperx_api_server.routers.observability import (
+    router as observability_router,
 )
 
 from whisperx_api_server.routers.models import (
@@ -48,58 +48,88 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
     config = get_config()
 
-    if config.mode == DistributedMode.KAFKA:
-        from whisperx_api_server import s3_client, kafka_client
-        await s3_client.init_client(config.s3)
-        await kafka_client.start(config.kafka)
+    gpu_task: "asyncio.Task | None" = None
+    if config.metrics.enabled:
+        from whisperx_api_server.observability import gpu as _gpu
+        if _gpu._pynvml_ok:
+            def _on_gpu_task_done(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "GPU metrics poller died unexpectedly — VRAM/utilization gauges will stop updating",
+                        exc_info=task.exception(),
+                    )
 
-        def _on_reply_task_done(task: asyncio.Task) -> None:
-            if not task.cancelled() and task.exception() is not None:
-                logger.error(
-                    "Kafka reply consumer died unexpectedly — pending jobs will time out",
-                    exc_info=task.exception(),
-                )
+            gpu_task = asyncio.create_task(
+                _gpu._gpu_poll_loop(
+                    config.metrics.gpu_poll_interval, _gpu._nvml_handle),
+                name="gpu-metrics-poller",
+            )
+            gpu_task.add_done_callback(_on_gpu_task_done)
+            logger.info("GPU metrics poller started (interval=%ss)",
+                        config.metrics.gpu_poll_interval)
 
-        reply_task = asyncio.create_task(
-            kafka_client.reply_consumer_loop(config.kafka),
-            name="kafka-reply-consumer",
-        )
-        reply_task.add_done_callback(_on_reply_task_done)
-        logger.info("Kafka mode: S3 and Kafka clients started")
-        yield
-        reply_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await reply_task
-        await kafka_client.stop()
-        await s3_client.close_client()
-    else:
-        selected_backends = resolve_stage_backends()
-        logger.info(
-            f"Configured stage backends: transcription={selected_backends.transcription}, "
-            f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
-        )
-        try:
-            transcription_backend = get_transcription_backend(
-                selected_backends.transcription)
-            await transcription_backend.preload_default()
-        except Exception:
-            logger.exception(
-                "Failed to preload transcription backend; will try to load on demand")
-        try:
-            alignment_backend = get_alignment_backend(
-                selected_backends.alignment)
-            await alignment_backend.preload_default()
-        except Exception:
-            logger.exception(
-                "Failed to preload alignment backend; will try to load on demand")
-        try:
-            diarization_backend = get_diarization_backend(
-                selected_backends.diarization)
-            await diarization_backend.preload_default()
-        except Exception:
-            logger.exception(
-                "Failed to preload diarization backend; will try to load on demand")
-        yield
+    try:
+        if config.mode == DistributedMode.KAFKA:
+            from whisperx_api_server import s3_client, kafka_client
+            await s3_client.init_client(config.s3)
+            await kafka_client.start(config.kafka)
+
+            def _on_reply_task_done(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "Kafka reply consumer died unexpectedly — pending jobs will time out",
+                        exc_info=task.exception(),
+                    )
+
+            reply_task = asyncio.create_task(
+                kafka_client.reply_consumer_loop(config.kafka),
+                name="kafka-reply-consumer",
+            )
+            reply_task.add_done_callback(_on_reply_task_done)
+            logger.info("Kafka mode: S3 and Kafka clients started")
+            try:
+                yield
+            finally:
+                reply_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await reply_task
+                await kafka_client.stop()
+                await s3_client.close_client()
+        else:
+            selected_backends = resolve_stage_backends()
+            logger.info(
+                f"Configured stage backends: transcription={selected_backends.transcription}, "
+                f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
+            )
+            try:
+                transcription_backend = get_transcription_backend(
+                    selected_backends.transcription)
+                await transcription_backend.preload_default()
+            except Exception:
+                logger.exception(
+                    "Failed to preload transcription backend; will try to load on demand")
+            try:
+                alignment_backend = get_alignment_backend(
+                    selected_backends.alignment)
+                await alignment_backend.preload_default()
+            except Exception:
+                logger.exception(
+                    "Failed to preload alignment backend; will try to load on demand")
+            try:
+                diarization_backend = get_diarization_backend(
+                    selected_backends.diarization)
+                await diarization_backend.preload_default()
+            except Exception:
+                logger.exception(
+                    "Failed to preload diarization backend; will try to load on demand")
+            yield
+    finally:
+        # -------- GPU Task shutdown --------
+        if gpu_task is not None:
+            gpu_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await gpu_task
+            logger.info("GPU metrics poller stopped")
 
 
 def create_app() -> FastAPI:
@@ -115,8 +145,33 @@ def create_app() -> FastAPI:
 
     app = FastAPI(lifespan=lifespan)
 
-    # Misc router is for not protected endpoints like healthcheck
-    app.include_router(misc_router)
+    # Observability router hosts unauthenticated /healthcheck (and /metrics when
+    # METRICS_ENABLED=true — /metrics is registered directly on `app` below).
+    app.include_router(observability_router)
+
+    if config.metrics.enabled:
+        from whisperx_api_server.observability.registry import (
+            get_registry,
+            setup_metrics,
+        )
+
+        setup_metrics(config.metrics)
+
+        from whisperx_api_server.observability.http import MetricsMiddleware
+        app.add_middleware(MetricsMiddleware)
+
+        from fastapi import Response as FastAPIResponse
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        @app.get("/metrics", include_in_schema=False)
+        def metrics_endpoint() -> FastAPIResponse:
+            return FastAPIResponse(
+                content=generate_latest(get_registry()),
+                media_type=CONTENT_TYPE_LATEST,
+            )
+
+        logger.info(
+            "Observability: /metrics endpoint registered (unauthenticated)")
 
     app.include_router(models_router, dependencies=dependencies)
     app.include_router(transcribe_router, dependencies=dependencies)

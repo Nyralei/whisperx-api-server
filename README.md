@@ -13,17 +13,25 @@ A FastAPI server that exposes [WhisperX](https://github.com/m-bain/WhisperX) as 
 
 ## Quick Start
 
+Each profile selects exactly one combination — service set, image tags, and `--extra` build args are all driven by the profile so images stay minimal.
+
 ### Standalone (single server)
 
 ```bash
-# GPU (CUDA)
+# 1. Normal CUDA              → image: whisperx-api:cuda
 docker compose --profile cuda up
 
-# CPU
+# 2. Normal CPU               → image: whisperx-api:cpu
 docker compose --profile cpu up
+
+# 5. CUDA + Observability     → image: whisperx-api:cuda-metrics  (+ Prometheus)
+docker compose --profile cuda-observe up
+
+# 6. CPU + Observability      → image: whisperx-api:cpu-metrics   (+ Prometheus)
+docker compose --profile cpu-observe up
 ```
 
-The API is available at `http://localhost:8000`.
+The API is available at `http://localhost:8000`. With an `*-observe` profile, Prometheus is on `:9090` (point your own Grafana / dashboard at it).
 
 ### Distributed mode (Kafka + workers)
 
@@ -31,17 +39,33 @@ The API is available at `http://localhost:8000`.
 # Copy and edit credentials before first run
 cp .env.example .env
 
-# CUDA workers
+# 3. CUDA + Kafka                       → api: whisperx-api:kafka,         worker: whisperx-worker:cuda-kafka
 docker compose -f compose-kafka.yaml --profile cuda up
 
-# CPU workers
+# 4. CPU + Kafka                        → api: whisperx-api:kafka,         worker: whisperx-worker:cpu-kafka
 docker compose -f compose-kafka.yaml --profile cpu up
 
-# Both worker types simultaneously
-docker compose -f compose-kafka.yaml --profile cuda --profile cpu up
+# 7. CUDA + Kafka + Observability       → api: whisperx-api:kafka-metrics, worker: whisperx-worker:cuda-kafka-metrics
+docker compose -f compose-kafka.yaml --profile cuda-observe up
+
+# 8. CPU + Kafka + Observability        → api: whisperx-api:kafka-metrics, worker: whisperx-worker:cpu-kafka-metrics
+docker compose -f compose-kafka.yaml --profile cpu-observe up
 ```
 
 > Workers process one job at a time per container. Scale horizontally by running multiple worker replicas.
+
+### Profile matrix
+
+| # | Mode | Profile | Compose file |
+|---|---|---|---|
+| 1 | Normal CUDA | `cuda` | `compose.yaml` |
+| 2 | Normal CPU | `cpu` | `compose.yaml` |
+| 3 | CUDA + Kafka | `cuda` | `compose-kafka.yaml` |
+| 4 | CPU + Kafka | `cpu` | `compose-kafka.yaml` |
+| 5 | CUDA + Observability | `cuda-observe` | `compose.yaml` |
+| 6 | CPU + Observability | `cpu-observe` | `compose.yaml` |
+| 7 | CUDA + Kafka + Observability | `cuda-observe` | `compose-kafka.yaml` |
+| 8 | CPU + Kafka + Observability | `cpu-observe` | `compose-kafka.yaml` |
 
 ## Configuration
 
@@ -149,10 +173,10 @@ Only the `whisperx` backend ships by default. Custom backends can be registered 
 
 | File | Purpose |
 |---|---|
-| `compose.yaml` | Standalone server — use `--profile cuda` or `--profile cpu` |
-| `compose-kafka.yaml` | Distributed stack — API server + Kafka + MinIO + workers via `--profile cuda` / `--profile cpu` |
+| `compose.yaml` | Standalone server — profiles: `cuda`, `cpu`, `cuda-observe`, `cpu-observe` |
+| `compose-kafka.yaml` | Distributed stack (API + Kafka + MinIO + workers) — same four profiles |
 
-Workers are opt-in via profiles so `docker compose up` never accidentally starts a GPU process on a machine that doesn't have one.
+Every runtime variant is gated by exactly one profile, so `docker compose up` never accidentally starts a GPU process on a machine that doesn't have one and observability stacks never spawn duplicate API servers.
 
 ## Contributing
 

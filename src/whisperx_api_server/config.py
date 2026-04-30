@@ -1,6 +1,6 @@
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -236,6 +236,21 @@ class S3Config(BaseModel):
     object_expiry_days: int = Field(default=1)
 
 
+class MetricsConfig(BaseModel):
+    # When false, no observability code is loaded and /metrics route is not registered.
+    # Set METRICS_ENABLED=true to enable. Requires the optional [metrics] extra
+    # (pip install "whisperx-api-server[metrics]"). In direct (non-Kafka) mode,
+    # METRICS_ENABLED=true assumes --workers 1 (per-app CollectorRegistry does not
+    # share across worker processes).
+    enabled: bool = Field(default=False)
+    # Seconds between pynvml GPU polls.
+    gpu_poll_interval: int = Field(default=15)
+    # Port for the worker /metrics HTTP server (prometheus_client.start_http_server).
+    # Each worker replica sets METRICS__WORKER_PORT to a unique value when scraped.
+    # Used in DistributedMode.KAFKA to expose GPU metrics from worker processes that are not running the main ASGI server. Ignored in DistributedMode.DIRECT.
+    worker_port: int = Field(default=9091)
+
+
 class Config(BaseSettings):
     """
     Configuration for the application. Values can be set via environment variables.
@@ -288,3 +303,25 @@ class Config(BaseSettings):
     kafka: KafkaConfig = KafkaConfig()
 
     s3: S3Config = S3Config()
+
+    metrics: MetricsConfig = MetricsConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _propagate_metrics_enabled(cls, values: dict) -> dict:
+        """Map flat METRICS_ENABLED env var to metrics.enabled.
+
+        pydantic-settings env_nested_delimiter='__' maps METRICS__ENABLED → metrics.enabled
+        automatically, but the conventional shorter form METRICS_ENABLED is also supported
+        here as an alias for operator convenience.  METRICS__ENABLED takes precedence if
+        both are set.
+        """
+        import os
+
+        flat_val = os.environ.get("METRICS_ENABLED")
+        if flat_val is not None and isinstance(values, dict):
+            metrics = values.get("metrics", {})
+            if isinstance(metrics, dict) and "enabled" not in metrics:
+                metrics["enabled"] = flat_val
+                values["metrics"] = metrics
+        return values

@@ -33,6 +33,10 @@ kafka = [
     "aiobotocore>=2.15.0",
     "aiofiles>=24.1.0",
 ]
+metrics = [
+    "prometheus-client>=0.21",
+    "nvidia-ml-py>=12.0",
+]
 
 [tool.uv]
 conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]

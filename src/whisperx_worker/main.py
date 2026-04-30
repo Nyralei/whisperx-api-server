@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -21,6 +22,40 @@ async def run_worker() -> None:
 
     config = get_config()
     setup_logger(config.log_level)
+
+    gpu_task: "asyncio.Task | None" = None
+    if config.metrics.enabled:
+        from whisperx_api_server.observability.registry import setup_metrics, get_registry
+        from whisperx_api_server.observability import gpu as _gpu
+        from prometheus_client import start_http_server
+
+        # creates _registry, runs _setup_gpu_instruments
+        setup_metrics(config.metrics)
+
+        if _gpu._pynvml_ok:
+            def _on_gpu_task_done(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "Worker GPU metrics poller died unexpectedly — VRAM/utilization gauges will stop updating",
+                        exc_info=task.exception(),
+                    )
+
+            gpu_task = asyncio.create_task(
+                _gpu._gpu_poll_loop(
+                    config.metrics.gpu_poll_interval, _gpu._nvml_handle),
+                name="worker-gpu-metrics-poller",
+            )
+            gpu_task.add_done_callback(_on_gpu_task_done)
+            logger.info(
+                "Worker GPU metrics poller started (interval=%ss)",
+                config.metrics.gpu_poll_interval,
+            )
+
+        start_http_server(config.metrics.worker_port, registry=get_registry())
+        logger.info(
+            "Worker /metrics server started on port %s",
+            config.metrics.worker_port,
+        )
 
     await s3_client.init_client(config.s3)
 
@@ -119,6 +154,11 @@ async def run_worker() -> None:
             logger.info(f"Job {job_id}: done, consumer resumed")
 
     finally:
+        if gpu_task is not None:
+            gpu_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await gpu_task
+            logger.info("Worker GPU metrics poller stopped")
         await consumer.stop()
         await producer.stop()
         await s3_client.close_client()

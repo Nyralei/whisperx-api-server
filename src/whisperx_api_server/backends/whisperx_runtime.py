@@ -176,15 +176,15 @@ async def load_align_model(
     config = get_config()
     inference_device = determine_inference_device()
     selected_model_name = model_name
-    if "multilingual" in config.alignment.models:
-        selected_model_name = config.alignment.models["multilingual"]
-        logger.info(
-            f"Overriding with 'multilingual' alignment model: {selected_model_name}")
-    elif language_code in config.alignment.models:
+    if language_code in config.alignment.models:
         selected_model_name = config.alignment.models[language_code]
         logger.info(
             f"Using configured alignment model for '{language_code}': {selected_model_name}"
         )
+    elif "multilingual" in config.alignment.models:
+        selected_model_name = config.alignment.models["multilingual"]
+        logger.info(
+            f"Falling back to 'multilingual' alignment model: {selected_model_name}")
 
     if (
         selected_model_name is not None

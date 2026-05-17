@@ -2,7 +2,6 @@ import contextlib
 import os
 import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -13,8 +12,6 @@ import time
 import tempfile
 import asyncio
 from fastapi import UploadFile
-
-from whisperx import audio as whisperx_audio
 
 from whisperx_api_server.config import (
     Language,
@@ -37,7 +34,6 @@ logger = logging.getLogger(__name__)
 config = get_config()
 
 _concurrency_semaphore = None
-_io_executor: ThreadPoolExecutor | None = None
 _UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 _UPLOAD_WRITE_BUFFER_SIZE = 1024 * 1024  # 1 MiB
 
@@ -59,12 +55,85 @@ def _cleanup_cache_only():
         torch.cuda.empty_cache()
 
 
-def _get_io_executor() -> ThreadPoolExecutor:
-    global _io_executor
-    if _io_executor is None:
-        _io_executor = ThreadPoolExecutor(
-            max_workers=config.io_executor_workers, thread_name_prefix="whisperx_io")
-    return _io_executor
+_SAMPLE_RATE = 16000  # matches whisperx.audio.SAMPLE_RATE
+
+
+def _ffmpeg_decode_cmd(input_arg: str, sample_rate: int) -> list[str]:
+    cmd = ["ffmpeg", "-threads", "0"]
+    if input_arg != "pipe:0":
+        cmd.append("-nostdin")
+    cmd += ["-i", input_arg, "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "pipe:1"]
+    return cmd
+
+
+async def _run_ffmpeg_decode(
+    input_arg: str,
+    feed_stdin,
+    request_id: str,
+    sample_rate: int,
+) -> np.ndarray:
+    proc = await asyncio.create_subprocess_exec(
+        *_ffmpeg_decode_cmd(input_arg, sample_rate),
+        stdin=asyncio.subprocess.PIPE if feed_stdin else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def _pump_stdin():
+        if feed_stdin is None:
+            return
+        try:
+            await feed_stdin(proc.stdin)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # ffmpeg died early; stderr reader will surface the real reason
+        finally:
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    try:
+        _, pcm, err = await asyncio.gather(
+            _pump_stdin(),
+            proc.stdout.read(),
+            proc.stderr.read(),
+        )
+    except BaseException:
+        proc.kill()
+        await proc.wait()
+        raise
+
+    rc = await proc.wait()
+    if rc != 0:
+        msg = err.decode(errors="replace").strip()
+        logger.error(f"Request ID: {request_id} - ffmpeg exited {rc}: {msg}")
+        raise RuntimeError(f"ffmpeg failed (exit {rc}): {msg}")
+
+    audio = np.frombuffer(pcm, dtype=np.float32).copy()
+    logger.info(
+        f"Request ID: {request_id} - Audio decoded "
+        f"({audio.size} samples, {audio.size / sample_rate:.2f}s)"
+    )
+    return audio
+
+
+async def load_audio_from_path(
+    file_path: str,
+    request_id: str,
+    sample_rate: int = _SAMPLE_RATE,
+) -> np.ndarray:
+    return await _run_ffmpeg_decode(file_path, None, request_id, sample_rate)
+
+
+async def load_audio_from_bytes(
+    audio_bytes: bytes,
+    request_id: str,
+    sample_rate: int = _SAMPLE_RATE,
+) -> np.ndarray:
+    async def feed(stdin):
+        stdin.write(audio_bytes)
+        await stdin.drain()
+    return await _run_ffmpeg_decode("pipe:0", feed, request_id, sample_rate)
 
 
 async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
@@ -130,19 +199,6 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
         raise write_error[0]
 
     return file_path
-
-
-async def _load_audio(file_path: str, request_id: str) -> np.ndarray:
-    loop = asyncio.get_running_loop()
-    executor = _get_io_executor()
-    try:
-        audio = await loop.run_in_executor(executor, whisperx_audio.load_audio, file_path)
-        logger.info(
-            f"Request ID: {request_id} - Audio loaded from {file_path}")
-        return audio
-    except Exception as e:
-        logger.error(f"Request ID: {request_id} - Failed to load audio: {e}")
-        raise
 
 
 def _finalize_text(result: dict[str, Any], align_or_diarize: bool) -> dict[str, Any]:
@@ -216,7 +272,7 @@ async def transcribe(
             f"Request ID: {request_id} - Transcribing {audio_file.filename} with model: {model_name}, options: {asr_options}, language: {language}, task: {task}, stage_backends: {selected_backends}")
 
         t0 = time.perf_counter()
-        audio = await _load_audio(file_path, request_id)
+        audio = await load_audio_from_path(file_path, request_id)
         profile["audio_load"] = time.perf_counter() - t0
         logger.info(
             f"Request ID: {request_id} - Loading audio took {profile['audio_load']:.2f} seconds")

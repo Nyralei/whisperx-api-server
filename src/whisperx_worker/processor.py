@@ -1,8 +1,6 @@
 import asyncio
 import json
 import logging
-import os
-import tempfile
 import time
 from typing import Any
 
@@ -18,7 +16,7 @@ from whisperx_api_server.backends.registry import (
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.transcriber import (
-    _load_audio,
+    load_audio_from_bytes,
     _finalize_text,
     _cleanup_cache_only,
     _get_concurrency_semaphore,
@@ -54,7 +52,6 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
     diarize = params.get("diarize", False)
 
     start_time = time.perf_counter()
-    file_path = None
     audio = None
     concurrency_sem = _get_concurrency_semaphore()
     semaphore_acquired = False
@@ -69,21 +66,11 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
             f"Job {job_id}: S3 download took {profile['s3_download']:.2f} seconds")
 
         t0 = time.perf_counter()
-        suffix = f"_{filename}"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            await asyncio.to_thread(tmp.write, audio_bytes)
-            file_path = tmp.name
-        del audio_bytes
-        profile["file_write"] = time.perf_counter() - t0
-
-        t0 = time.perf_counter()
-        audio = await _load_audio(file_path, job_id)
+        audio = await load_audio_from_bytes(audio_bytes, job_id)
         profile["audio_load"] = time.perf_counter() - t0
+        del audio_bytes
         logger.info(
             f"Job {job_id}: loading audio took {profile['audio_load']:.2f} seconds")
-
-        os.remove(file_path)
-        file_path = None
 
         if concurrency_sem:
             await concurrency_sem.acquire()
@@ -168,8 +155,6 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
     finally:
         if concurrency_sem and semaphore_acquired:
             concurrency_sem.release()
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
         if config.audio_cleanup and audio is not None:
             del audio
             logger.info(f"Job {job_id}: audio data cleaned up")

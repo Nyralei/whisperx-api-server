@@ -293,9 +293,6 @@ class Config(BaseSettings):
     # Maximum number of concurrent GPU transcriptions (0 = unlimited, only applies when CUDA is available)
     max_concurrent_transcriptions: int = 1
 
-    # Thread-pool workers for async I/O (audio load/save)
-    io_executor_workers: int = 4
-
     hf_token: str = Field(alias="HF_TOKEN", default="", repr=False)
 
     mode: DistributedMode = Field(default=DistributedMode.DIRECT)

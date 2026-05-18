@@ -19,6 +19,7 @@ async def init_client(cfg: S3Config) -> None:
     from aiobotocore.session import AioSession
 
     _config = cfg
+    from botocore.config import Config as BotocoreConfig
     session = AioSession()
     ctx = session.create_client(
         "s3",
@@ -26,6 +27,11 @@ async def init_client(cfg: S3Config) -> None:
         endpoint_url=cfg.endpoint_url,
         aws_access_key_id=cfg.access_key_id,
         aws_secret_access_key=cfg.secret_access_key,
+        config=BotocoreConfig(
+            retries={"max_attempts": 5, "mode": "adaptive"},
+            connect_timeout=10,
+            read_timeout=120,
+        ),
     )
     _client = await ctx.__aenter__()
     logger.info(
@@ -41,7 +47,7 @@ async def init_client(cfg: S3Config) -> None:
             await _client.create_bucket(Bucket=cfg.bucket)
             logger.info(f"Created S3 bucket: {cfg.bucket}")
 
-        if cfg.object_expiry_days > 0:
+        if cfg.manage_lifecycle and cfg.object_expiry_days > 0:
             await _client.put_bucket_lifecycle_configuration(
                 Bucket=cfg.bucket,
                 LifecycleConfiguration={
@@ -80,6 +86,15 @@ async def upload_audio(data: bytes, job_id: str, filename: str) -> str:
     key = f"audio/{job_id}/{filename}"
     await _client.put_object(Bucket=_config.bucket, Key=key, Body=data)
     logger.debug(f"Uploaded {len(data)} bytes to s3://{_config.bucket}/{key}")
+    return key
+
+
+async def upload_audio_stream(fileobj, job_id: str, filename: str) -> str:
+    if _client is None or _config is None:
+        raise RuntimeError("S3 client not initialized")
+    key = f"audio/{job_id}/{filename}"
+    await _client.put_object(Bucket=_config.bucket, Key=key, Body=fileobj)
+    logger.debug(f"Uploaded stream to s3://{_config.bucket}/{key}")
     return key
 
 

@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Form
+from fastapi import APIRouter, Form, HTTPException, status
 from fastapi.responses import JSONResponse
 from typing import Annotated
 from pydantic import AfterValidator
@@ -48,7 +48,11 @@ def list_models_endpoint():
         models = backend.list_loaded_models()
         return JSONResponse(content={"models": models}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to list transcription models")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
 
 
 @router.post(
@@ -56,17 +60,27 @@ def list_models_endpoint():
     description="Unload a model",
     tags=["models", "transcribe"],
 )
-def unload_model_endpoint(model: Annotated[ModelName, Form()]):
+async def unload_model_endpoint(model: Annotated[ModelName, Form()]):
     logger.info(f"Received request to unload model {model}")
     try:
         selected_backends = resolve_stage_backends()
         backend = get_transcription_backend(selected_backends.transcription)
-        unloaded = backend.unload_model(model)
-        response_data = {"status": "success"} if unloaded else {
-            "status": "error", "message": f"Model {model} not found"}
-        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+        unloaded = await backend.unload_model(model)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to unload transcription model %s", model)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
+    if not unloaded:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model} not found",
+        )
+    return JSONResponse(
+        content={"status": "success"},
+        media_type=MediaType.APPLICATION_JSON,
+    )
 
 
 @router.post(
@@ -84,7 +98,11 @@ async def load_model(model: Annotated[ModelName, Form()]):
         await backend.load_model(model_name=model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to load transcription model %s", model)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
 
 
 @router.get(
@@ -98,7 +116,11 @@ def list_align_models_endpoint():
         backend = get_alignment_backend(selected_backends.alignment)
         return JSONResponse(content={"models": backend.list_loaded_models()}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to list alignment models")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
 
 
 @router.post(
@@ -106,18 +128,28 @@ def list_align_models_endpoint():
     description="Unload an align model",
     tags=["models", "align"],
 )
-def unload_align_model_endpoint(language: Annotated[Language, Form()]):
+async def unload_align_model_endpoint(language: Annotated[Language, Form()]):
     logger.info(f"Received request to unload align model {language}")
+    language_code = getattr(language, "value", language)
     try:
         selected_backends = resolve_stage_backends()
         backend = get_alignment_backend(selected_backends.alignment)
-        language_code = getattr(language, "value", language)
-        unloaded = backend.unload_model(str(language_code))
-        response_data = {"status": "success"} if unloaded else {
-            "status": "error", "message": f"Model with language {language_code} not found"}
-        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+        unloaded = await backend.unload_model(str(language_code))
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to unload align model %s", language_code)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
+    if not unloaded:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model with language {language_code} not found",
+        )
+    return JSONResponse(
+        content={"status": "success"},
+        media_type=MediaType.APPLICATION_JSON,
+    )
 
 
 @router.post(
@@ -127,16 +159,20 @@ def unload_align_model_endpoint(language: Annotated[Language, Form()]):
 )
 async def load_alignment_endpoint(language: Annotated[Language, Form()]):
     logger.info(f"Received request to load align model {language}")
+    language_code = str(getattr(language, "value", language))
     try:
         selected_backends = resolve_stage_backends()
         backend = get_alignment_backend(selected_backends.alignment)
-        language_code = str(getattr(language, "value", language))
         if language_code in backend.list_loaded_models():
             return JSONResponse(content={"status": "success", "model": language_code}, media_type=MediaType.APPLICATION_JSON)
         await backend.load_model(language_code)
         return JSONResponse(content={"status": "success", "model": language_code}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to load align model %s", language_code)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
 
 
 @router.get(
@@ -150,7 +186,11 @@ def list_diarize_models_endpoint():
         backend = get_diarization_backend(selected_backends.diarization)
         return JSONResponse(content={"models": backend.list_loaded_models()}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to list diarization models")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
 
 
 @router.post(
@@ -158,17 +198,27 @@ def list_diarize_models_endpoint():
     description="Unload a diarize model",
     tags=["models", "diarize"],
 )
-def unload_diarize_model(model: Annotated[ModelName, Form()]):
+async def unload_diarize_model(model: Annotated[ModelName, Form()]):
     logger.info(f"Received request to unload diarize model {model}")
     try:
         selected_backends = resolve_stage_backends()
         backend = get_diarization_backend(selected_backends.diarization)
-        unloaded = backend.unload_model(model)
-        response_data = {"status": "success"} if unloaded else {
-            "status": "error", "message": f"Model {model} not found"}
-        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+        unloaded = await backend.unload_model(model)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to unload diarize model %s", model)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
+    if not unloaded:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model} not found",
+        )
+    return JSONResponse(
+        content={"status": "success"},
+        media_type=MediaType.APPLICATION_JSON,
+    )
 
 
 @router.post(
@@ -186,4 +236,8 @@ async def load_diarization_endpoint(model: Annotated[ModelName, Form()]):
         await backend.load_model(model_name=model)
         return JSONResponse(content={"status": "success", "model": model}, media_type=MediaType.APPLICATION_JSON)
     except Exception as e:
-        return JSONResponse(content={"status": "error", "message": str(e)}, media_type=MediaType.APPLICATION_JSON)
+        logger.exception("Failed to load diarize model %s", model)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e

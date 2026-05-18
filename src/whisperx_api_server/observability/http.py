@@ -9,10 +9,40 @@ from starlette.types import ASGIApp, Scope, Receive, Send
 EXCLUDED_PATHS: frozenset[str] = frozenset({"/metrics"})
 
 ERROR_TYPE_MAP: dict[int, str] = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    413: "payload_too_large",
+    422: "invalid_audio",
+    500: "pipeline_error",
     503: "queue_full",
     504: "timeout",
-    500: "pipeline_error",
 }
+
+# Static allowlist used as the `endpoint` label for the in-flight gauge.
+# Any path not in this set is normalized to "other" so unbounded paths
+# (typos, scanners, future routes) cannot grow Prometheus cardinality.
+KNOWN_INFLIGHT_PATHS: frozenset[str] = frozenset(
+    {
+        "/healthcheck",
+        "/v1/audio/transcriptions",
+        "/v1/audio/translations",
+        "/models/list",
+        "/models/load",
+        "/models/unload",
+        "/align_models/list",
+        "/align_models/load",
+        "/align_models/unload",
+        "/diarize_models/list",
+        "/diarize_models/load",
+        "/diarize_models/unload",
+    }
+)
+
+
+def _inflight_label(path: str) -> str:
+    return path if path in KNOWN_INFLIGHT_PATHS else "other"
 
 
 class _NoOpHistogram:
@@ -93,6 +123,7 @@ class MetricsMiddleware:
         # has replaced the singletons.
         from whisperx_api_server.observability import http as _http
 
+        inflight_label: str = _inflight_label(path)
         start_time = time.perf_counter()
         status_holder: list[int] = []
 
@@ -103,7 +134,7 @@ class MetricsMiddleware:
                 status_holder.append(message["status"])
             await send(message)
 
-        _http.requests_in_flight.labels(endpoint=path).inc()
+        _http.requests_in_flight.labels(endpoint=inflight_label).inc()
         try:
             await self.app(scope, receive, wrapped_send)
         finally:
@@ -114,7 +145,7 @@ class MetricsMiddleware:
             sc_class = f"{sc // 100}xx"
             method: str = scope.get("method", "")
 
-            _http.requests_in_flight.labels(endpoint=path).dec()
+            _http.requests_in_flight.labels(endpoint=inflight_label).dec()
             _http.requests_total.labels(
                 endpoint=endpoint, method=method, status_code=str(sc)
             ).inc()

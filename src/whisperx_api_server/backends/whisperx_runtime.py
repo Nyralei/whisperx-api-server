@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import gc
 import logging
+import os
 from asyncio import Lock
 from collections import defaultdict
 from typing import Any, Dict, Optional, Tuple
@@ -13,8 +14,22 @@ from whisperx import transcribe as whisperx_transcribe
 from whisperx.asr import FasterWhisperPipeline
 
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.executors import get_io_executor
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_ct2_threads(configured: int, device: str) -> int:
+    # User-specified value wins.
+    if configured and configured > 0:
+        return configured
+    # CT2 treats 0 as "OMP_NUM_THREADS or hardcoded 4", so we pick explicitly.
+    # CPU device: saturate the box. CUDA device: CT2 only needs a few CPU threads
+    # for tokenization / mel-spec / beam bookkeeping; oversubscribing starves
+    # PyTorch align/diarize threads.
+    if device == "cpu":
+        return os.cpu_count() or 4
+    return 4
 
 
 def _hashable_options(opts: Any) -> Any:
@@ -31,15 +46,62 @@ def _hashable_options(opts: Any) -> Any:
 transcribe_pipeline_instances: Dict[Tuple[Any, ...],
                                     FasterWhisperPipeline] = {}
 transcribe_pipeline_locks = defaultdict(Lock)
+transcribe_in_use: defaultdict[Tuple[Any, ...], int] = defaultdict(int)
 align_model_instances: dict[str, dict[str, Any]] = {}
 alignment_locks = defaultdict(Lock)
 alignment_cache_mod_lock = Lock()
+align_in_use: defaultdict[str, int] = defaultdict(int)
 diarize_pipeline_instances: dict[str,
                                  whisperx_diarize.DiarizationPipeline] = {}
 diarize_locks = defaultdict(Lock)
+diarize_in_use: defaultdict[str, int] = defaultdict(int)
+
+
+def align_cache_key_for(language_code: str) -> str:
+    """Returns the cache key used in align_model_instances for the given language_code."""
+    config = get_config()
+    if "multilingual" in config.alignment.models:
+        return "multilingual"
+    return language_code
+
+
+def acquire_align_model(language_code: str) -> None:
+    align_in_use[align_cache_key_for(language_code)] += 1
+
+
+def release_align_model(language_code: str) -> None:
+    key = align_cache_key_for(language_code)
+    if align_in_use[key] > 0:
+        align_in_use[key] -= 1
+
+
+def acquire_transcribe_pipeline(cache_key: Tuple[Any, ...]) -> None:
+    transcribe_in_use[cache_key] += 1
+
+
+def release_transcribe_pipeline(cache_key: Tuple[Any, ...]) -> None:
+    if transcribe_in_use[cache_key] > 0:
+        transcribe_in_use[cache_key] -= 1
+    if transcribe_in_use[cache_key] == 0:
+        transcribe_in_use.pop(cache_key, None)
+
+
+def acquire_diarize_pipeline(model_name: str) -> None:
+    diarize_in_use[model_name] += 1
+
+
+def release_diarize_pipeline(model_name: str) -> None:
+    if diarize_in_use[model_name] > 0:
+        diarize_in_use[model_name] -= 1
+    if diarize_in_use[model_name] == 0:
+        diarize_in_use.pop(model_name, None)
 
 
 def unload_model_object(model_obj: Any) -> None:
+    """Move a model off GPU and free CUDA cache. Blocking — callers from the
+    event loop should run this via `loop.run_in_executor(get_io_executor(), ...)`
+    because `model.to("cpu")` and `torch.cuda.empty_cache()` synchronize CUDA.
+    """
     if model_obj is None:
         return
     with contextlib.suppress(Exception):
@@ -49,7 +111,16 @@ def unload_model_object(model_obj: Any) -> None:
             model_obj.model.to("cpu")
     del model_obj
     gc.collect()
-    torch.cuda.empty_cache()
+    with contextlib.suppress(Exception):
+        torch.cuda.empty_cache()
+
+
+async def unload_model_object_async(model_obj: Any) -> None:
+    """Async wrapper that offloads the blocking GPU teardown to the IO executor."""
+    if model_obj is None:
+        return
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(get_io_executor(), unload_model_object, model_obj)
 
 
 def check_device() -> str:
@@ -128,26 +199,30 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
             vad_options=config.whisper.vad_options,
             download_root=config.whisper.download_root,
             local_files_only=config.whisper.local_files_only,
-            threads=config.whisper.cpu_threads or 4,
+            threads=_resolve_ct2_threads(config.whisper.cpu_threads, inference_device),
             use_auth_token=config.hf_token,
         )
 
+    loop = asyncio.get_running_loop()
     if not config.whisper.cache:
         logger.info(
             f"Initializing transcribe pipeline without cache: {cache_key}")
-        pipeline = await asyncio.to_thread(_create_pipeline)
-        pipeline._transcribe_lock = transcribe_pipeline_locks[cache_key]
+        pipeline = await loop.run_in_executor(get_io_executor(), _create_pipeline)
+        pipeline._transcribe_lock = asyncio.Lock()
+        pipeline._cache_key = None  # uncached: unload-time refcount doesn't apply
         return pipeline
 
     pipeline = await _get_or_init_model(
         key=cache_key,
         cache_dict=transcribe_pipeline_instances,
         lock_dict=transcribe_pipeline_locks,
-        init_func=lambda: asyncio.to_thread(_create_pipeline),
+        init_func=lambda: loop.run_in_executor(
+            get_io_executor(), _create_pipeline),
         log_reuse="Reusing cached transcribe pipeline: {key}",
         log_init="Initializing transcribe pipeline: {key}",
     )
     pipeline._transcribe_lock = transcribe_pipeline_locks[cache_key]
+    pipeline._cache_key = cache_key
     return pipeline
 
 
@@ -158,13 +233,19 @@ async def _cleanup_alignment_cache_whitelist(keep_key: Optional[str] = None) -> 
         return
     async with alignment_cache_mod_lock:
         keys_to_remove = [
-            k for k in align_model_instances if k not in whitelist and k != keep_key]
+            k for k in align_model_instances
+            if k not in whitelist and k != keep_key and align_in_use[k] == 0
+        ]
         for key in keys_to_remove:
             logger.info(
                 f"Unloading alignment model for {key} (not in whitelist).")
             align_model_data = align_model_instances.pop(key, None)
+            # Drop the per-key lock so the defaultdict doesn't grow unbounded
+            # over the process lifetime as languages come and go.
+            alignment_locks.pop(key, None)
+            align_in_use.pop(key, None)
             if align_model_data:
-                unload_model_object(align_model_data.get("model"))
+                await unload_model_object_async(align_model_data.get("model"))
                 del align_model_data
 
 
@@ -204,7 +285,7 @@ async def load_align_model(
     async def _init_alignment() -> Tuple[Any, Dict[str, Any]]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None,
+            get_io_executor(),
             lambda: whisperx_alignment.load_align_model(
                 language_code=language_code,
                 device=inference_device,
@@ -245,16 +326,18 @@ async def load_diarize_pipeline(model_name: str) -> whisperx_diarize.Diarization
             device=inference_device,
         )
 
+    loop = asyncio.get_running_loop()
     if not config.diarization.cache:
         logger.info(
             f"Initializing diarization model without cache: {model_name}")
-        return await asyncio.to_thread(_init_diarization)
+        return await loop.run_in_executor(get_io_executor(), _init_diarization)
 
     diarize_model = await _get_or_init_model(
         key=model_name,
         cache_dict=diarize_pipeline_instances,
         lock_dict=diarize_locks,
-        init_func=lambda: asyncio.to_thread(_init_diarization),
+        init_func=lambda: loop.run_in_executor(
+            get_io_executor(), _init_diarization),
         log_reuse="Reusing cached diarization model for: {key}",
         log_init="Initializing diarization model: {key}",
     )

@@ -12,15 +12,27 @@ from whisperx import diarize as whisperx_diarize
 
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.executors import get_model_executor, get_io_executor
 from .whisperx_runtime import (
     align_model_instances,
+    alignment_cache_mod_lock,
+    alignment_locks,
+    acquire_align_model,
+    acquire_diarize_pipeline,
+    acquire_transcribe_pipeline,
+    align_cache_key_for,
     determine_inference_device,
+    diarize_locks,
     diarize_pipeline_instances,
     load_align_model,
     load_diarize_pipeline,
     load_transcribe_pipeline,
+    release_align_model,
+    release_diarize_pipeline,
+    release_transcribe_pipeline,
     transcribe_pipeline_instances,
-    unload_model_object,
+    transcribe_pipeline_locks,
+    unload_model_object_async,
 )
 
 from .registry import (
@@ -83,13 +95,31 @@ class WhisperXTranscriptionBackend:
     async def load_model(self, model_name: str) -> None:
         await load_transcribe_pipeline(model_name=model_name)
 
-    def unload_model(self, model_name: str) -> bool:
+    async def unload_model(self, model_name: str) -> bool:
+        # Pop first so no new request can grab this instance from the cache.
+        # New requests calling load_transcribe_pipeline() will then get a fresh
+        # lock from the defaultdict, isolated from our teardown.
+        #
+        # Old in-flight requests already hold a reference to the popped lock
+        # (via getattr(model, "_transcribe_lock", ...)), so we hold the lock
+        # for the entire teardown — both pre-existing critical sections and
+        # post-pop callers serialize behind us, and once we release the lock
+        # they would still see a torn-down model. Acceptable: the request
+        # would either succeed on CPU or surface a backend error mapped to 5xx.
         to_remove = [k for k in transcribe_pipeline_instances if k[0] == model_name]
+        if not to_remove:
+            return False
         for cache_key in to_remove:
             pipeline = transcribe_pipeline_instances.pop(cache_key, None)
-            if pipeline is not None:
-                unload_model_object(pipeline)
-        return bool(to_remove)
+            lock = transcribe_pipeline_locks.pop(cache_key, None)
+            if pipeline is None:
+                continue
+            if lock is not None:
+                async with lock:
+                    await unload_model_object_async(pipeline)
+            else:
+                await unload_model_object_async(pipeline)
+        return True
 
     async def transcribe(
         self,
@@ -115,6 +145,7 @@ class WhisperXTranscriptionBackend:
         )
 
         lock = getattr(model, "_transcribe_lock", None)
+        cache_key = getattr(model, "_cache_key", None)
 
         def _run_transcription() -> dict[str, Any]:
             with torch.inference_mode():
@@ -127,13 +158,20 @@ class WhisperXTranscriptionBackend:
                     task=task,
                 )
 
-        if lock is not None:
-            async with lock:
+        # Refcount so concurrent /models/unload can see this pipeline is in use.
+        if cache_key is not None:
+            acquire_transcribe_pipeline(cache_key)
+        try:
+            if lock is not None:
+                async with lock:
+                    _apply_request_options(model, asr_options)
+                    result = await loop.run_in_executor(get_model_executor(), _run_transcription)
+            else:
                 _apply_request_options(model, asr_options)
-                result = await loop.run_in_executor(None, _run_transcription)
-        else:
-            _apply_request_options(model, asr_options)
-            result = await loop.run_in_executor(None, _run_transcription)
+                result = await loop.run_in_executor(get_model_executor(), _run_transcription)
+        finally:
+            if cache_key is not None:
+                release_transcribe_pipeline(cache_key)
 
         logger.info(
             f"Request ID: {request_id} - Transcription completed using backend=whisperx")
@@ -160,11 +198,21 @@ class WhisperXAlignmentBackend:
     async def load_model(self, model_name: str) -> None:
         await load_align_model(model_name)
 
-    def unload_model(self, model_name: str) -> bool:
-        align_model_data = align_model_instances.pop(model_name, None)
+    async def unload_model(self, model_name: str) -> bool:
+        # Pop atomically against the cache-eviction lock so concurrent
+        # whitelist cleanup can't race the same key. Hold the per-key lock
+        # for the entire teardown — both in-flight `align()` callers and the
+        # whitelist cleanup serialize behind it.
+        async with alignment_cache_mod_lock:
+            align_model_data = align_model_instances.pop(model_name, None)
+            lock = alignment_locks.pop(model_name, None)
         if align_model_data is None:
             return False
-        unload_model_object(align_model_data.get("model"))
+        if lock is not None:
+            async with lock:
+                await unload_model_object_async(align_model_data.get("model"))
+        else:
+            await unload_model_object_async(align_model_data.get("model"))
         return True
 
     async def align(
@@ -182,29 +230,37 @@ class WhisperXAlignmentBackend:
 
         loop = asyncio.get_running_loop()
         device = determine_inference_device()
+        cache_key = align_cache_key_for(language_code)
 
-        alignment_model_start = time.perf_counter()
-        logger.info(
-            f"Request ID: {request_id} - Loading alignment model backend=whisperx language={language_code}"
-        )
-        model_a, metadata = await load_align_model(language_code=language_code)
-        logger.info(
-            f"Request ID: {request_id} - Alignment model loaded in {time.perf_counter() - alignment_model_start:.2f} seconds"
-        )
+        # Increment refcount before load so eviction skips this key while we hold it.
+        acquire_align_model(language_code)
+        try:
+            alignment_model_start = time.perf_counter()
+            logger.info(
+                f"Request ID: {request_id} - Loading alignment model backend=whisperx language={language_code}"
+            )
+            model_a, metadata = await load_align_model(language_code=language_code)
+            logger.info(
+                f"Request ID: {request_id} - Alignment model loaded in {time.perf_counter() - alignment_model_start:.2f} seconds"
+            )
 
-        def _run_alignment() -> Any:
-            with torch.inference_mode():
-                return whisperx_alignment.align(
-                    transcript=result["segments"],
-                    model=model_a,
-                    align_model_metadata=metadata,
-                    audio=audio,
-                    device=device,
-                    return_char_alignments=False,
-                )
+            def _run_alignment() -> Any:
+                with torch.inference_mode():
+                    return whisperx_alignment.align(
+                        transcript=result["segments"],
+                        model=model_a,
+                        align_model_metadata=metadata,
+                        audio=audio,
+                        device=device,
+                        return_char_alignments=False,
+                    )
 
-        alignment_start = time.perf_counter()
-        result["segments"] = await loop.run_in_executor(None, _run_alignment)
+            alignment_start = time.perf_counter()
+            async with alignment_locks[cache_key]:
+                result["segments"] = await loop.run_in_executor(get_model_executor(), _run_alignment)
+        finally:
+            release_align_model(language_code)
+
         logger.info(
             f"Request ID: {request_id} - Alignment completed using backend=whisperx in {time.perf_counter() - alignment_start:.2f} seconds"
         )
@@ -223,11 +279,19 @@ class WhisperXDiarizationBackend:
     async def load_model(self, model_name: str) -> None:
         await load_diarize_pipeline(model_name=model_name)
 
-    def unload_model(self, model_name: str) -> bool:
+    async def unload_model(self, model_name: str) -> bool:
+        # Pop first so new requests get a fresh cache miss path. Hold the
+        # popped lock during teardown so any in-flight diarize that already
+        # has a reference to the old pipeline finishes before we tear it down.
         model = diarize_pipeline_instances.pop(model_name, None)
+        lock = diarize_locks.pop(model_name, None)
         if model is None:
             return False
-        unload_model_object(model)
+        if lock is not None:
+            async with lock:
+                await unload_model_object_async(model)
+        else:
+            await unload_model_object_async(model)
         return True
 
     async def diarize(
@@ -259,12 +323,22 @@ class WhisperXDiarizationBackend:
                     return diarize_model(audio=audio, return_embeddings=True)
                 return diarize_model(audio=audio), None
 
+        # Refcount so concurrent /diarize_models/unload sees this is in use.
+        acquire_diarize_pipeline(config.diarization.model)
         diarize_start = time.perf_counter()
-        diarize_segments, embeddings = await loop.run_in_executor(None, _run_diarization)
-        result["segments"] = whisperx_diarize.assign_word_speakers(
-            diarize_segments,
-            result["segments"],
-            embeddings,
+        try:
+            async with diarize_locks[config.diarization.model]:
+                diarize_segments, embeddings = await loop.run_in_executor(get_model_executor(), _run_diarization)
+        finally:
+            release_diarize_pipeline(config.diarization.model)
+        # Lock released before CPU-only word assignment so the diarize slot is free sooner.
+        result["segments"] = await loop.run_in_executor(
+            get_io_executor(),
+            lambda: whisperx_diarize.assign_word_speakers(
+                diarize_segments,
+                result["segments"],
+                embeddings,
+            ),
         )
         logger.info(
             f"Request ID: {request_id} - Diarization completed using backend=whisperx in {time.perf_counter() - diarize_start:.2f} seconds"

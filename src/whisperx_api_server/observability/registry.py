@@ -67,7 +67,10 @@ def _setup_pipeline_instruments(registry: "CollectorRegistry") -> None:
     """Construct real pipeline Histograms and replace pipeline.py shims in-place."""
     from prometheus_client import Histogram
     from whisperx_api_server.observability import pipeline as _pipe
-    from whisperx_api_server.observability.taxonomy import PIPELINE_BUCKETS
+    from whisperx_api_server.observability.taxonomy import (
+        PIPELINE_BUCKETS,
+        SEMAPHORE_BUCKETS,
+    )
 
     _pipe.stage_duration = Histogram(
         "whisperx_stage_duration_seconds",
@@ -80,7 +83,7 @@ def _setup_pipeline_instruments(registry: "CollectorRegistry") -> None:
         "whisperx_semaphore_wait_seconds",
         "Time to acquire the GPU concurrency semaphore in seconds",
         labelnames=[],
-        buckets=PIPELINE_BUCKETS,
+        buckets=SEMAPHORE_BUCKETS,
         registry=registry,
     )
     _pipe.realtime_factor = Histogram(

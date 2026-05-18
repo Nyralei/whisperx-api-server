@@ -54,7 +54,6 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
     start_time = time.perf_counter()
     audio = None
     concurrency_sem = _get_concurrency_semaphore()
-    semaphore_acquired = False
     profile: dict[str, float] = {}
 
     try:
@@ -74,87 +73,88 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
 
         if concurrency_sem:
             await concurrency_sem.acquire()
-            semaphore_acquired = True
             logger.debug(f"Job {job_id}: acquired GPU concurrency semaphore")
 
-        selected_backends = resolve_stage_backends()
-        transcription_backend = get_transcription_backend(
-            selected_backends.transcription)
-        alignment_backend = get_alignment_backend(
-            selected_backends.alignment) if (align or diarize) else None
-        diarization_backend = get_diarization_backend(
-            selected_backends.diarization) if diarize else None
+        try:
+            selected_backends = resolve_stage_backends()
+            transcription_backend = get_transcription_backend(
+                selected_backends.transcription)
+            alignment_backend = get_alignment_backend(
+                selected_backends.alignment) if (align or diarize) else None
+            diarization_backend = get_diarization_backend(
+                selected_backends.diarization) if diarize else None
 
-        model_name = params.get(
-            "model_name") or get_default_transcription_model_name()
-        raw_language = params.get("language")
-        language = Language(
-            raw_language) if raw_language else config.default_language
-        asr_options = params.get("asr_options")
-        task = params.get("task", "transcribe")
+            model_name = params.get(
+                "model_name") or get_default_transcription_model_name()
+            raw_language = params.get("language")
+            language = Language(
+                raw_language) if raw_language else config.default_language
+            asr_options = params.get("asr_options")
+            task = params.get("task", "transcribe")
 
-        logger.info(
-            f"Job {job_id}: transcribing {filename} with model: {model_name}, "
-            f"options: {asr_options}, language: {language}, task: {task}, "
-            f"stage_backends: {selected_backends}"
-        )
-
-        t0 = time.perf_counter()
-        result = await transcription_backend.transcribe(
-            model_name=model_name,
-            audio=audio,
-            batch_size=params.get("batch_size", config.whisper.batch_size),
-            chunk_size=params.get("chunk_size", config.whisper.chunk_size),
-            language=language,
-            task=task,
-            asr_options=asr_options,
-            request_id=job_id,
-        )
-        profile["transcribe"] = time.perf_counter() - t0
-        logger.info(
-            f"Job {job_id}: transcription took {profile['transcribe']:.2f} seconds")
-
-        if align or diarize:
-            if alignment_backend is None:
-                raise RuntimeError(
-                    "Alignment backend is not initialized but alignment or diarization was requested"
-                )
-            t0 = time.perf_counter()
-            result = await alignment_backend.align(
-                result=result, audio=audio, request_id=job_id
+            logger.info(
+                f"Job {job_id}: transcribing {filename} with model: {model_name}, "
+                f"options: {asr_options}, language: {language}, task: {task}, "
+                f"stage_backends: {selected_backends}"
             )
-            profile["align"] = time.perf_counter() - t0
-            logger.debug(
-                f"Job {job_id}: alignment took {profile['align']:.2f} seconds")
 
-        if diarize:
             t0 = time.perf_counter()
-            result = await diarization_backend.diarize(
-                result=result,
+            result = await transcription_backend.transcribe(
+                model_name=model_name,
                 audio=audio,
-                speaker_embeddings=params.get("speaker_embeddings", False),
+                batch_size=params.get("batch_size", config.whisper.batch_size),
+                chunk_size=params.get("chunk_size", config.whisper.chunk_size),
+                language=language,
+                task=task,
+                asr_options=asr_options,
                 request_id=job_id,
             )
-            profile["diarize"] = time.perf_counter() - t0
+            profile["transcribe"] = time.perf_counter() - t0
+            logger.info(
+                f"Job {job_id}: transcription took {profile['transcribe']:.2f} seconds")
+
+            if align or diarize:
+                if alignment_backend is None:
+                    raise RuntimeError(
+                        "Alignment backend is not initialized but alignment or diarization was requested"
+                    )
+                t0 = time.perf_counter()
+                result = await alignment_backend.align(
+                    result=result, audio=audio, request_id=job_id
+                )
+                profile["align"] = time.perf_counter() - t0
+                logger.debug(
+                    f"Job {job_id}: alignment took {profile['align']:.2f} seconds")
+
+            if diarize:
+                t0 = time.perf_counter()
+                result = await diarization_backend.diarize(
+                    result=result,
+                    audio=audio,
+                    speaker_embeddings=params.get("speaker_embeddings", False),
+                    request_id=job_id,
+                )
+                profile["diarize"] = time.perf_counter() - t0
+                logger.debug(
+                    f"Job {job_id}: diarization took {profile['diarize']:.2f} seconds")
+
+            t0 = time.perf_counter()
+            result = _finalize_text(result, align or diarize)
+            profile["finalize"] = time.perf_counter() - t0
+
+            total = time.perf_counter() - start_time
+            logger.info(f"Job {job_id}: transcription complete for {filename}")
             logger.debug(
-                f"Job {job_id}: diarization took {profile['diarize']:.2f} seconds")
-
-        t0 = time.perf_counter()
-        result = _finalize_text(result, align or diarize)
-        profile["finalize"] = time.perf_counter() - t0
-
-        total = time.perf_counter() - start_time
-        logger.info(f"Job {job_id}: transcription complete for {filename}")
-        logger.debug(
-            f"Job {job_id}: profile: total={total:.2f}s | "
-            + " | ".join(f"{k}={v:.2f}s" for k, v in profile.items())
-            + f" | (other={total - sum(profile.values()):.2f}s)"
-        )
-        return result
+                f"Job {job_id}: profile: total={total:.2f}s | "
+                + " | ".join(f"{k}={v:.2f}s" for k, v in profile.items())
+                + f" | (other={total - sum(profile.values()):.2f}s)"
+            )
+            return result
+        finally:
+            if concurrency_sem:
+                concurrency_sem.release()
 
     finally:
-        if concurrency_sem and semaphore_acquired:
-            concurrency_sem.release()
         if config.audio_cleanup and audio is not None:
             del audio
             logger.info(f"Job {job_id}: audio data cleaned up")

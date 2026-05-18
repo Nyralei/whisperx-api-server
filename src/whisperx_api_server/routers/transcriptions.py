@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from .models import handle_default_openai_model
 from fastapi import (
@@ -15,7 +16,11 @@ import time
 
 
 import whisperx_api_server.transcriber as transcriber
-from whisperx_api_server.transcriber import QueueFullError
+from whisperx_api_server.transcriber import (
+    InvalidAudioError,
+    QueueFullError,
+    UploadTooLargeError,
+)
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.backends.registry import (
@@ -26,6 +31,42 @@ from whisperx_api_server.config import (
     Language,
     ResponseFormat,
 )
+
+try:
+    import torch as _torch
+    _CUDA_OOM_EXC: type[BaseException] = _torch.cuda.OutOfMemoryError
+except Exception:  # torch missing or no CUDA build
+    _CUDA_OOM_EXC = RuntimeError  # benign fallback; isinstance still works
+
+
+def _raise_for_transcription_error(request_id: str, e: Exception, kind: str) -> None:
+    """Map domain exceptions to specific HTTP codes; fall through to 500."""
+    if isinstance(e, InvalidAudioError):
+        logger.info(f"Request ID: {request_id} - Invalid audio: {e}")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+    if isinstance(e, UploadTooLargeError):
+        logger.info(f"Request ID: {request_id} - Upload too large: {e}")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e
+    if isinstance(e, QueueFullError):
+        logger.warning(f"Request ID: {request_id} - Queue full: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is busy, please try again later.",
+        ) from e
+    if isinstance(e, asyncio.TimeoutError) or isinstance(e, TimeoutError):
+        logger.warning(f"Request ID: {request_id} - Timeout: {e}")
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)) from e
+    if isinstance(e, _CUDA_OOM_EXC) and "out of memory" in str(e).lower():
+        logger.error(f"Request ID: {request_id} - CUDA OOM: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Out of GPU memory; retry shortly.",
+        ) from e
+    logger.exception(f"Request ID: {request_id} - {kind} failed: {e}")
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"An unexpected error occurred while processing the {kind} request.",
+    ) from e
 
 logger = logging.getLogger(__name__)
 
@@ -185,19 +226,11 @@ async def transcribe_audio(
                 chunk_size=chunk_size,
                 request_id=request_id,
             )
-    except QueueFullError as e:
-        logger.warning(f"Request ID: {request_id} - Queue full: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Server is busy, please try again later."
-        ) from e
+    except asyncio.CancelledError:
+        logger.info(f"Request ID: {request_id} - Client disconnected; cancelling")
+        raise
     except Exception as e:
-        logger.exception(
-            f"Request ID: {request_id} - Transcription failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred while processing the transcription request."
-        ) from e
+        _raise_for_transcription_error(request_id, e, "transcription")
 
     total_time = time.time() - start_time
     logger.info(
@@ -281,18 +314,11 @@ async def translate_audio(
                 request_id=request_id,
                 task="translate",
             )
-    except QueueFullError as e:
-        logger.warning(f"Request ID: {request_id} - Queue full: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Server is busy, please try again later."
-        ) from e
+    except asyncio.CancelledError:
+        logger.info(f"Request ID: {request_id} - Client disconnected; cancelling")
+        raise
     except Exception as e:
-        logger.exception(f"Request ID: {request_id} - Translation failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred while processing the translation request."
-        ) from e
+        _raise_for_transcription_error(request_id, e, "translation")
 
     total_time = time.time() - start_time
     logger.info(

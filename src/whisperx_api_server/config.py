@@ -160,6 +160,10 @@ class WhisperConfig(BaseModel):
     inference_device: Device = Field(default=Device.AUTO)
     device_index: int | list[int] = Field(default=0)
     compute_type: Quantization = Field(default=Quantization.DEFAULT)
+    # CTranslate2 intra-op threads. 0 = auto: os.cpu_count() on CPU device, 4 on CUDA.
+    # NOTE: CTranslate2 itself treats 0 as "OMP_NUM_THREADS or hardcoded 4", so we resolve
+    # explicitly at load time. On CUDA, CT2 only uses these threads for tokenization /
+    # mel-spec / beam bookkeeping — saturating cores there starves align/diarize.
     cpu_threads: int = Field(default=0)
     num_workers: int = Field(default=1)
     vad_method: VadMethod = Field(default=VadMethod.PYANNOTE)
@@ -192,6 +196,9 @@ class AlignConfig(BaseModel):
     preload_model: bool = Field(default=False)
     preload_model_name: str = Field(default=None)
     local_files_only: bool = Field(default=False)
+    # Download NLTK punkt_tab tokenizer at startup so the first alignment request
+    # does not block an executor thread on a network call.
+    nltk_preload: bool = Field(default=True)
 
 
 class DiarizeConfig(BaseModel):
@@ -216,11 +223,17 @@ class KafkaConfig(BaseModel):
     request_topic: str = Field(default="transcription-requests")
     reply_topic: str = Field(default="transcription-replies")
     consumer_group_worker: str = Field(default="whisperx-worker")
+    # Stable group id for the API-side reply consumer. Replicas of the API
+    # share this group so each reply is delivered exactly once. When running
+    # multiple replicas, each replica MUST set a unique `reply_group_instance_id`
+    # (Kafka static membership) to avoid rebalance churn on restart.
+    reply_group_id: str = Field(default="whisperx-api-reply")
+    reply_group_instance_id: str | None = Field(default=None)
     reply_timeout_seconds: float = Field(default=3600.0)
     max_poll_interval_ms: int = Field(default=600_000)
     # Maximum number of jobs waiting for a reply (0 = unlimited).
     # Requests beyond this limit are rejected with HTTP 503.
-    max_pending_jobs: int = Field(default=0)
+    max_pending_jobs: int = Field(default=100)
     # Must match broker KAFKA_MESSAGE_MAX_BYTES (default 50 MiB).
     max_message_bytes: int = Field(default=52428800)
 
@@ -234,6 +247,8 @@ class S3Config(BaseModel):
     delete_after_download: bool = Field(default=True)
     # Lifecycle expiry for objects in the bucket (days). 0 = disabled.
     object_expiry_days: int = Field(default=1)
+    # When true, apply a bucket lifecycle rule on startup. Requires object_expiry_days > 0.
+    manage_lifecycle: bool = Field(default=False)
 
 
 class MetricsConfig(BaseModel):
@@ -288,10 +303,25 @@ class Config(BaseSettings):
 
     cache_cleanup: bool = True
 
+    # Seconds between periodic torch.cuda.empty_cache() flushes (0 = disabled).
+    cache_cleanup_interval: int = Field(default=0, ge=0)
+
     audio_cleanup: bool = True
 
-    # Maximum number of concurrent GPU transcriptions (0 = unlimited, only applies when CUDA is available)
-    max_concurrent_transcriptions: int = 1
+    # Max concurrent ML inferences (transcribe/align/diarize). 0 = unlimited. Applied on both
+    # CPU and CUDA. The decode admission limit is automatically set to n+1 so one ffmpeg
+    # decode can overlap with the in-flight inference.
+    max_concurrent_transcriptions: int = Field(default=1, ge=0)
+
+    # Hard limit on upload size in bytes. 0 = unlimited (default). Enforced while
+    # streaming the upload to the temp file, so we don't materialize huge bodies
+    # on disk before rejecting.
+    max_upload_size_bytes: int = Field(default=0, ge=0)
+
+    # On SIGTERM, refuse new requests with HTTP 503 and wait up to this many
+    # seconds for in-flight work to drain before tearing down. Best-effort on
+    # Windows (signal handlers raise NotImplementedError under ProactorEventLoop).
+    shutdown_grace_seconds: int = Field(default=30, ge=0)
 
     hf_token: str = Field(alias="HF_TOKEN", default="", repr=False)
 

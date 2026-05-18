@@ -30,7 +30,7 @@ class TranscriptionBackend(Protocol):
     async def load_model(self, model_name: str) -> None:
         ...
 
-    def unload_model(self, model_name: str) -> bool:
+    async def unload_model(self, model_name: str) -> bool:
         ...
 
     async def transcribe(
@@ -58,7 +58,7 @@ class AlignmentBackend(Protocol):
     async def load_model(self, model_name: str) -> None:
         ...
 
-    def unload_model(self, model_name: str) -> bool:
+    async def unload_model(self, model_name: str) -> bool:
         ...
 
     async def align(
@@ -81,7 +81,7 @@ class DiarizationBackend(Protocol):
     async def load_model(self, model_name: str) -> None:
         ...
 
-    def unload_model(self, model_name: str) -> bool:
+    async def unload_model(self, model_name: str) -> bool:
         ...
 
     async def diarize(

@@ -246,6 +246,12 @@ class KafkaConfig(BaseModel):
     # metadata_max_age_ms refresh fires (default ~5 min).
     topic_partitions: int = Field(default=20, gt=0)
     topic_replication_factor: int = Field(default=1, gt=0)
+    # Best-effort topic for per-stage worker progress updates. The API consumes
+    # it with a unique group id per replica (group_id_prefix + pid + rand) so
+    # every replica receives every event; each replica filters by whether the
+    # request_id is locally tracked. Failures to publish are non-fatal.
+    progress_topic: str = Field(default="transcription-progress")
+    progress_group_id_prefix: str = Field(default="whisperx-api-progress")
 
 
 class S3Config(BaseModel):
@@ -274,6 +280,18 @@ class MetricsConfig(BaseModel):
     # Each worker replica sets METRICS__WORKER_PORT to a unique value when scraped.
     # Used in DistributedMode.KAFKA to expose GPU metrics from worker processes that are not running the main ASGI server. Ignored in DistributedMode.DIRECT.
     worker_port: int = Field(default=9091)
+
+
+class RequestStatusConfig(BaseModel):
+    # How long completed/failed states are retained for polling after the
+    # request finishes. Set to 0 to drop terminal states immediately (only
+    # in-flight requests visible).
+    ttl_seconds: float = Field(default=300.0, ge=0.0)
+    # Hard cap on tracker entries. When exceeded, oldest terminal entries are
+    # evicted first; oldest in-flight entries only as a last resort.
+    max_entries: int = Field(default=4096, gt=0)
+    # Interval for the background eviction sweep.
+    cleanup_interval_seconds: float = Field(default=30.0, gt=0.0)
 
 
 class Config(BaseSettings):
@@ -342,6 +360,8 @@ class Config(BaseSettings):
     s3: S3Config = S3Config()
 
     metrics: MetricsConfig = MetricsConfig()
+
+    request_status: RequestStatusConfig = RequestStatusConfig()
 
     @model_validator(mode="before")
     @classmethod

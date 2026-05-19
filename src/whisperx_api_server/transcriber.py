@@ -28,6 +28,7 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.observability import pipeline as _pipe
 from whisperx_api_server.observability import kafka as _kafka
+from whisperx_api_server import request_status
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,7 @@ async def transcribe(
     audio_duration_seconds = 0.0
 
     try:
+        request_status.set_stage(request_id, "upload_save")
         t0 = time.perf_counter()
         file_path = await _save_upload_to_temp(audio_file, request_id)
         profile["upload_save"] = time.perf_counter() - t0
@@ -291,6 +293,7 @@ async def transcribe(
         async with contextlib.AsyncExitStack() as _decode_stack:
             if decode_sem is not None:
                 await _decode_stack.enter_async_context(decode_sem)
+            request_status.set_stage(request_id, "audio_load")
             t0 = time.perf_counter()
             audio = await load_audio_from_path(file_path, request_id)
             profile["audio_load"] = time.perf_counter() - t0
@@ -330,6 +333,7 @@ async def transcribe(
 
         _sem_t0 = time.perf_counter()
         if concurrency_sem:
+            request_status.set_stage(request_id, "awaiting_concurrency")
             await concurrency_sem.acquire()
         _sem_elapsed = time.perf_counter() - _sem_t0
         logger.debug(
@@ -337,6 +341,7 @@ async def transcribe(
         _pipe.semaphore_wait.observe(_sem_elapsed)
 
         try:
+            request_status.set_stage(request_id, "transcribe")
             t0 = time.perf_counter()
             result = await transcription_stage_backend.transcribe(
                 model_name=model_name,
@@ -361,6 +366,7 @@ async def transcribe(
             if align or diarize:
                 if alignment_stage_backend is None:
                     raise RuntimeError("Alignment backend is not initialized.")
+                request_status.set_stage(request_id, "align")
                 t0 = time.perf_counter()
                 result = await alignment_stage_backend.align(
                     result=result,
@@ -380,6 +386,7 @@ async def transcribe(
             if diarize:
                 if diarization_stage_backend is None:
                     raise RuntimeError("Diarization backend is not initialized.")
+                request_status.set_stage(request_id, "diarize")
                 t0 = time.perf_counter()
                 result = await diarization_stage_backend.diarize(
                     result=result,
@@ -397,6 +404,7 @@ async def transcribe(
                         profile["diarize"] / audio_duration_seconds
                     )
 
+            request_status.set_stage(request_id, "finalize")
             t0 = time.perf_counter()
             result = _finalize_text(result, align or diarize)
             profile["finalize"] = time.perf_counter() - t0
@@ -409,6 +417,7 @@ async def transcribe(
                 + " | ".join(f"{k}={v:.2f}s" for k, v in profile.items())
                 + f" | (other={total - sum(profile.values()):.2f}s)")
 
+            request_status.mark_completed(request_id)
             return result
         finally:
             if concurrency_sem:
@@ -416,6 +425,7 @@ async def transcribe(
     except Exception as e:
         logger.error(
             f"Request ID: {request_id} - Transcription failed for {audio_file.filename} with error: {e}")
+        request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise
     finally:
         with contextlib.suppress(Exception):
@@ -442,29 +452,47 @@ async def transcribe_via_kafka(
     max_pending = config.kafka.max_pending_jobs
     if max_pending > 0 and len(kafka_client._pending_jobs) >= max_pending:
         _kafka.queue_rejected_total.inc()
-        raise QueueFullError(
+        err = QueueFullError(
             f"Too many pending jobs ({len(kafka_client._pending_jobs)}/{max_pending})"
         )
+        request_status.mark_failed(request_id, str(err), "QueueFullError")
+        raise err
 
     safe_name = _safe_filename(audio_file.filename)
+    request_status.set_stage(request_id, "uploading_to_s3")
     logger.info(f"Request ID: {request_id} - Uploading audio to S3")
-    s3_key = await s3_client.upload_audio_stream(audio_file.file, request_id, safe_name)
+    try:
+        s3_key = await s3_client.upload_audio_stream(audio_file.file, request_id, safe_name)
+    except Exception as e:
+        request_status.mark_failed(request_id, str(e), type(e).__name__)
+        raise
 
+    request_status.set_stage(request_id, "submitted_to_kafka")
     logger.info(
         f"Request ID: {request_id} - Submitting job to Kafka (key: {s3_key})")
-    future = await kafka_client.submit_job(request_id, s3_key, safe_name, params)
+    try:
+        future = await kafka_client.submit_job(request_id, s3_key, safe_name, params)
+    except Exception as e:
+        request_status.mark_failed(request_id, str(e), type(e).__name__)
+        raise
+
+    request_status.set_stage(request_id, "awaiting_worker")
     try:
         result = await asyncio.wait_for(future, timeout=config.kafka.reply_timeout_seconds)
         logger.info(f"Request ID: {request_id} - Received result from worker")
+        request_status.mark_completed(request_id)
         return result
     except asyncio.TimeoutError:
         kafka_client._pending_jobs.pop(request_id, None)
         _kafka.job_timeout_total.inc()
         logger.error(
             f"Request ID: {request_id} - Timed out waiting for worker reply")
-        raise TimeoutError(
+        err = TimeoutError(
             f"Job {request_id} timed out after {config.kafka.reply_timeout_seconds}s"
         )
-    except BaseException:
+        request_status.mark_failed(request_id, str(err), "TimeoutError")
+        raise err
+    except BaseException as e:
         kafka_client._pending_jobs.pop(request_id, None)
+        request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise

@@ -38,6 +38,12 @@ from whisperx_api_server.routers.transcriptions import (
     router as transcribe_router,
 )
 
+from whisperx_api_server.routers.status import (
+    router as status_router,
+)
+
+from whisperx_api_server import request_status
+
 
 _REQUEST_ID_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -194,6 +200,19 @@ async def lifespan(app: FastAPI):
     from whisperx_api_server.executors import shutdown_executors
     init_concurrency()
 
+    def _on_status_cleanup_done(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "request_status cleanup task died unexpectedly — terminal entries will no longer be evicted",
+                exc_info=task.exception(),
+            )
+
+    status_cleanup_task = asyncio.create_task(
+        request_status.cleanup_loop(),
+        name="request-status-cleanup",
+    )
+    status_cleanup_task.add_done_callback(_on_status_cleanup_done)
+
     if config.alignment.nltk_preload:
         try:
             import nltk
@@ -220,13 +239,30 @@ async def lifespan(app: FastAPI):
                 name="kafka-reply-consumer",
             )
             reply_task.add_done_callback(_on_reply_task_done)
+
+            def _on_progress_task_done(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "Kafka progress consumer died unexpectedly — per-stage status updates will stop",
+                        exc_info=task.exception(),
+                    )
+
+            progress_task = asyncio.create_task(
+                kafka_client.progress_consumer_loop(config.kafka),
+                name="kafka-progress-consumer",
+            )
+            progress_task.add_done_callback(_on_progress_task_done)
+
             logger.info("Kafka mode: S3 and Kafka clients started")
             try:
                 yield
             finally:
                 reply_task.cancel()
+                progress_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reply_task
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await progress_task
                 await kafka_client.stop()
                 await s3_client.close_client()
         else:
@@ -269,6 +305,10 @@ async def lifespan(app: FastAPI):
                 asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
 
         shutdown_executors()
+        # -------- Request-status cleanup task shutdown --------
+        status_cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await status_cleanup_task
         # -------- GPU Task shutdown --------
         if gpu_task is not None:
             gpu_task.cancel()
@@ -332,6 +372,7 @@ def create_app() -> FastAPI:
             "are disabled (model lifecycle lives in worker processes)"
         )
     app.include_router(transcribe_router, dependencies=dependencies)
+    app.include_router(status_router, dependencies=dependencies)
 
     if config.allow_origins is not None:
         app.add_middleware(

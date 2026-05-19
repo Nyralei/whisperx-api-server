@@ -14,6 +14,7 @@ from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
 import whisperx_api_server.s3_client as s3_client
 from whisperx_worker.processor import process_job, serialize_result
+from whisperx_worker.progress import publish_stage
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,11 @@ async def run_worker() -> None:
                 try:
                     reply: dict = {"job_id": job_id}
                     try:
-                        result = await process_job(event)
+                        result = await process_job(
+                            event,
+                            progress_producer=producer,
+                            progress_topic=config.kafka.progress_topic,
+                        )
                         reply["status"] = "ok"
                         reply["result"] = result
                     except Exception as exc:
@@ -199,6 +204,23 @@ async def run_worker() -> None:
                         # exceptions (e.g. InvalidAudioError → HTTP 422) instead
                         # of collapsing every worker failure to RuntimeError/500.
                         reply["error_type"] = type(exc).__name__
+
+                    # Best-effort terminal progress event (the API tracker
+                    # also calls mark_completed/mark_failed off the reply
+                    # path, so this is just an early signal — failures here
+                    # never affect the reply publish below).
+                    if reply["status"] == "ok":
+                        await publish_stage(
+                            producer, config.kafka.progress_topic,
+                            job_id, "completed", status="completed",
+                        )
+                    else:
+                        await publish_stage(
+                            producer, config.kafka.progress_topic,
+                            job_id, "failed", status="failed",
+                            error=reply.get("error"),
+                            error_type=reply.get("error_type"),
+                        )
 
                     # Publish reply before committing offset
                     await producer.send_and_wait(

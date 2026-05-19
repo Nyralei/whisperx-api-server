@@ -2,12 +2,15 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import struct
 import time
+import uuid
 from typing import Any
 
 from whisperx_api_server.config import KafkaConfig
 from whisperx_api_server.observability import kafka as _kafka
+from whisperx_api_server import request_status
 
 logger = logging.getLogger(__name__)
 
@@ -169,18 +172,23 @@ async def _ensure_topics(cfg: KafkaConfig) -> None:
             num_partitions=cfg.topic_partitions,
             replication_factor=cfg.topic_replication_factor,
         ),
+        NewTopic(
+            name=cfg.progress_topic,
+            num_partitions=cfg.topic_partitions,
+            replication_factor=cfg.topic_replication_factor,
+        ),
     ]
     try:
         await _admin.create_topics(topics)
         logger.info(
-            "Kafka topics ensured: %s, %s (partitions=%d, rf=%d)",
-            cfg.request_topic, cfg.reply_topic,
+            "Kafka topics ensured: %s, %s, %s (partitions=%d, rf=%d)",
+            cfg.request_topic, cfg.reply_topic, cfg.progress_topic,
             cfg.topic_partitions, cfg.topic_replication_factor,
         )
     except TopicAlreadyExistsError:
         logger.info(
-            "Kafka topics already exist: %s, %s",
-            cfg.request_topic, cfg.reply_topic,
+            "Kafka topics already exist: %s, %s, %s",
+            cfg.request_topic, cfg.reply_topic, cfg.progress_topic,
         )
     except Exception:
         # Non-fatal: if topic creation fails (e.g. permissions) the broker's
@@ -318,3 +326,69 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
     finally:
         await consumer.stop()
         logger.info("Kafka reply consumer stopped")
+
+
+async def progress_consumer_loop(cfg: KafkaConfig) -> None:
+    """Consume per-stage worker progress events and update the local request_status tracker.
+
+    Each API replica subscribes with a unique consumer group id (prefix + pid + rand)
+    so every replica receives every event from the broker. The replica then filters
+    by whether the request_id is known locally — only the replica that submitted
+    the job has a tracker entry, so other replicas no-op on every message.
+
+    Best-effort: parse errors are logged and skipped; commit failures are ignored
+    (we use enable_auto_commit so this is a no-op anyway).
+    """
+    from aiokafka import AIOKafkaConsumer
+
+    group_id = f"{cfg.progress_group_id_prefix}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    consumer = AIOKafkaConsumer(
+        cfg.progress_topic,
+        bootstrap_servers=cfg.bootstrap_servers,
+        group_id=group_id,
+        auto_offset_reset="latest",
+        enable_auto_commit=True,
+        fetch_max_bytes=cfg.max_message_bytes,
+        max_partition_fetch_bytes=cfg.max_message_bytes,
+    )
+    await consumer.start()
+    logger.info(
+        "Kafka progress consumer started (group: %s, topic: %s)",
+        group_id, cfg.progress_topic,
+    )
+    try:
+        async for msg in consumer:
+            try:
+                event = json.loads(msg.value)
+            except Exception:
+                logger.warning("Progress consumer: failed to parse message, skipping")
+                continue
+
+            job_id = event.get("job_id")
+            stage = event.get("stage")
+            status_val = event.get("status")
+            if not job_id or not stage:
+                continue
+            # Only touch the tracker if this replica submitted the job.
+            if request_status.get(job_id) is None:
+                continue
+
+            try:
+                if status_val == "failed":
+                    request_status.mark_failed(
+                        job_id,
+                        event.get("error", "worker error"),
+                        event.get("error_type"),
+                    )
+                elif status_val == "completed":
+                    # Defensive — reply path also calls mark_completed; idempotent.
+                    request_status.mark_completed(job_id)
+                else:
+                    request_status.set_stage(job_id, f"worker.{stage}")
+            except Exception:
+                logger.exception(
+                    "Progress consumer: failed to apply event for job %s", job_id
+                )
+    finally:
+        await consumer.stop()
+        logger.info("Kafka progress consumer stopped")

@@ -22,6 +22,7 @@ from whisperx_api_server.transcriber import (
     _get_concurrency_semaphore,
 )
 import whisperx_api_server.s3_client as s3_client
+from whisperx_worker.progress import publish_stage
 
 logger = logging.getLogger(__name__)
 config = get_config()
@@ -42,7 +43,12 @@ def serialize_result(result: dict) -> str:
     return json.dumps(result, cls=_NumpyEncoder)
 
 
-async def process_job(event: dict[str, Any]) -> dict[str, Any]:
+async def process_job(
+    event: dict[str, Any],
+    *,
+    progress_producer: Any = None,
+    progress_topic: str | None = None,
+) -> dict[str, Any]:
     job_id = event["job_id"]
     s3_key = event["s3_key"]
     filename = event.get("filename", "audio")
@@ -56,7 +62,11 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
     concurrency_sem = _get_concurrency_semaphore()
     profile: dict[str, float] = {}
 
+    async def _progress(stage: str) -> None:
+        await publish_stage(progress_producer, progress_topic or "", job_id, stage)
+
     try:
+        await _progress("s3_download")
         t0 = time.perf_counter()
         logger.info(f"Job {job_id}: downloading audio from S3 (key: {s3_key})")
         audio_bytes = await s3_client.download_audio(s3_key)
@@ -64,6 +74,7 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
         logger.info(
             f"Job {job_id}: S3 download took {profile['s3_download']:.2f} seconds")
 
+        await _progress("audio_load")
         t0 = time.perf_counter()
         audio = await load_audio_from_bytes(audio_bytes, job_id)
         profile["audio_load"] = time.perf_counter() - t0
@@ -72,6 +83,7 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
             f"Job {job_id}: loading audio took {profile['audio_load']:.2f} seconds")
 
         if concurrency_sem:
+            await _progress("awaiting_gpu")
             await concurrency_sem.acquire()
             logger.debug(f"Job {job_id}: acquired GPU concurrency semaphore")
 
@@ -98,6 +110,7 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
                 f"stage_backends: {selected_backends}"
             )
 
+            await _progress("transcribe")
             t0 = time.perf_counter()
             result = await transcription_backend.transcribe(
                 model_name=model_name,
@@ -118,6 +131,7 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
                     raise RuntimeError(
                         "Alignment backend is not initialized but alignment or diarization was requested"
                     )
+                await _progress("align")
                 t0 = time.perf_counter()
                 result = await alignment_backend.align(
                     result=result, audio=audio, request_id=job_id
@@ -127,6 +141,7 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
                     f"Job {job_id}: alignment took {profile['align']:.2f} seconds")
 
             if diarize:
+                await _progress("diarize")
                 t0 = time.perf_counter()
                 result = await diarization_backend.diarize(
                     result=result,
@@ -138,6 +153,7 @@ async def process_job(event: dict[str, Any]) -> dict[str, Any]:
                 logger.debug(
                     f"Job {job_id}: diarization took {profile['diarize']:.2f} seconds")
 
+            await _progress("finalize")
             t0 = time.perf_counter()
             result = _finalize_text(result, align or diarize)
             profile["finalize"] = time.perf_counter() - t0

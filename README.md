@@ -8,6 +8,7 @@ A FastAPI server that exposes [WhisperX](https://github.com/m-bain/WhisperX) as 
 - **Alignment & diarization** — word-level timestamps and speaker labels out of the box
 - **Multiple output formats** — `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud`, `text`
 - **Distributed mode** — offload GPU work to dedicated workers via Kafka + S3 (MinIO)
+- **Live request status** — poll an in-flight transcription's current pipeline stage by request id, in both direct and Kafka modes
 - **Pluggable backends** — swap transcription, alignment, and diarization implementations per stage
 - **API key auth** — single key or a JSON key-map for multi-client setups
 
@@ -88,10 +89,19 @@ All available settings are defined in [`config.py`](src/whisperx_api_server/conf
 | Variable | Default | Description |
 |---|---|---|
 | `KAFKA__BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker address |
+| `KAFKA__PROGRESS_TOPIC` | `transcription-progress` | Best-effort topic for per-stage worker progress events consumed by the status endpoint |
 | `S3__ENDPOINT_URL` | `http://localhost:9000` | S3 / MinIO endpoint |
 | `S3__BUCKET` | `whisperx-audio` | Bucket for audio uploads |
 | `MINIO_ROOT_USER` | `minioadmin` | MinIO root user — **change before deploying** |
 | `MINIO_ROOT_PASSWORD` | `minioadmin` | MinIO root password — **change before deploying** |
+
+**Status-endpoint tuning (both modes):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `REQUEST_STATUS__TTL_SECONDS` | `300` | How long terminal states (completed / failed) are retained for polling |
+| `REQUEST_STATUS__MAX_ENTRIES` | `4096` | Hard cap on tracked requests; terminal entries are evicted first when over capacity |
+| `REQUEST_STATUS__CLEANUP_INTERVAL_SECONDS` | `30` | How often the background sweep evicts expired entries |
 
 ## API Reference
 
@@ -134,6 +144,74 @@ Transcribe an audio file. Compatible with the [OpenAI transcription API](https:/
 ### `POST /v1/audio/translations`
 
 Translate audio to English. Same parameters as `/v1/audio/transcriptions`, minus `language`, `align`, `diarize`, and diarization-related fields.
+
+---
+
+### `GET /v1/audio/transcriptions/{request_id}/status`
+
+Return the live processing stage for a transcription request. Useful for surfacing a "still working — currently transcribing" indicator in long-running UIs.
+
+Because the transcription POST is synchronous (the response only arrives when the whole pipeline finishes), the client must set its own id on the POST so it can poll status in parallel:
+
+```bash
+# Submit with a known id
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -H 'X-Request-ID: my-request-1' \
+  -F file=@audio.mp3 -F model=large-v3 -F align=true &
+
+# Poll status from another shell
+curl http://localhost:8000/v1/audio/transcriptions/my-request-1/status
+```
+
+The middleware accepts client-supplied `X-Request-ID` values matching `[A-Za-z0-9._-]{1,128}`; anything else is rejected and replaced with a server-generated UUID (returned via the response header, by which point it is too late to poll).
+
+**Response (200)**
+
+```jsonc
+{
+  "request_id": "my-request-1",
+  "status": "in_progress",            // queued | in_progress | completed | failed
+  "mode": "direct",                   // or "kafka"
+  "stage": "transcribe",              // name of the active stage
+  "submitted_at": 1779198758.12,
+  "updated_at":   1779198764.16,
+  "completed_at": null,               // set when status is terminal
+  "filename": "audio.mp3",
+  "stages": [
+    {"name": "upload_save",           "duration_seconds": 0.003, "started_at": 1779198758.12, "completed_at": 1779198758.12, "in_progress": false},
+    {"name": "audio_load",            "duration_seconds": 0.374, "started_at": 1779198758.12, "completed_at": 1779198758.49, "in_progress": false},
+    {"name": "awaiting_concurrency",  "duration_seconds": 0.0,   "started_at": 1779198758.49, "completed_at": 1779198758.49, "in_progress": false},
+    {"name": "transcribe",                                       "started_at": 1779198758.49,                                "in_progress": true}
+  ],
+  "error": null,
+  "error_type": null
+}
+```
+
+**Stages**
+
+| Mode | Stage names |
+|---|---|
+| direct | `upload_save`, `audio_load`, `awaiting_concurrency`, `transcribe`, `align`, `diarize`, `finalize` |
+| kafka (API-side) | `uploading_to_s3`, `submitted_to_kafka`, `awaiting_worker` |
+| kafka (worker-side, via `transcription-progress` topic) | `worker.s3_download`, `worker.audio_load`, `worker.awaiting_gpu`, `worker.transcribe`, `worker.align`, `worker.diarize`, `worker.finalize` |
+
+Failures (invalid audio, queue full, timeout, worker error, …) end the lifecycle with `status="failed"` and populate `error` / `error_type`. Stages completed before the failure are preserved.
+
+Terminal states (`completed` / `failed`) are retained for `REQUEST_STATUS__TTL_SECONDS` (default 300s) so polling clients that arrive just after the POST returns can still confirm the outcome. After that, the id 404s.
+
+**Other responses**
+
+- `400 Bad Request` — malformed `request_id` (must match `[A-Za-z0-9._-]{1,128}`)
+- `404 Not Found` — id is unknown, never received by this replica, or evicted
+
+> The tracker lives in-process. With multiple API replicas behind a load balancer, status is visible only on the replica that handled the POST. Plan ID-aware client routing (sticky sessions) if you scale out.
+
+---
+
+### `GET /info`
+
+Returns the running version, mode, uptime, concurrency / queue state, and (in Kafka mode) discovered worker membership. Add `?detail=full` for extended Kafka topology.
 
 ---
 

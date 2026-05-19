@@ -21,6 +21,7 @@ from whisperx_api_server.transcriber import (
     QueueFullError,
     UploadTooLargeError,
 )
+from whisperx_api_server import request_status
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.backends.registry import (
@@ -157,6 +158,18 @@ async def transcribe_audio(
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()
+    request_status.start(
+        request_id,
+        mode=config.mode.value,
+        filename=file.filename,
+        params={
+            "endpoint": "transcriptions",
+            "model": model,
+            "language": language.value if language else None,
+            "align": align,
+            "diarize": diarize,
+        },
+    )
     logger.info(f"Request ID: {request_id} - Received request to transcribe {file.filename} with parameters: \
         model: {model}, \
         language: {language}, \
@@ -176,15 +189,19 @@ async def transcribe_audio(
 
     if not align:
         if response_format in ('vtt', 'srt', 'aud', 'vtt_json'):
+            detail = "Subtitles format ('vtt', 'srt', 'aud', 'vtt_json') requires alignment to be enabled."
+            request_status.mark_failed(request_id, detail, "HTTPException")
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Subtitles format ('vtt', 'srt', 'aud', 'vtt_json') requires alignment to be enabled."
+                detail=detail,
             )
 
         if diarize:
+            detail = "Diarization requires alignment to be enabled."
+            request_status.mark_failed(request_id, detail, "HTTPException")
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Diarization requires alignment to be enabled."
+                detail=detail,
             )
 
     word_timestamps = "word" in timestamp_granularities
@@ -275,6 +292,15 @@ async def translate_audio(
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received translation request")
     start_time = time.time()
+    request_status.start(
+        request_id,
+        mode=config.mode.value,
+        filename=file.filename,
+        params={
+            "endpoint": "translations",
+            "model": model,
+        },
+    )
     logger.info(f"Request ID: {request_id} - Received request to translate {file.filename} with parameters: \
         model: {model}, \
         prompt: {prompt}, \

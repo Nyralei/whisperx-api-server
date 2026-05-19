@@ -11,6 +11,7 @@ import logging
 import time
 import tempfile
 import asyncio
+import torch
 from fastapi import UploadFile
 
 from whisperx_api_server.config import (
@@ -89,6 +90,8 @@ def _get_decode_semaphore() -> asyncio.Semaphore | None:
 
 def _cleanup_cache_only():
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 _SAMPLE_RATE = 16000  # matches whisperx.audio.SAMPLE_RATE

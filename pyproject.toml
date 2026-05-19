@@ -1,6 +1,6 @@
 [project]
 name = "whisperx-api-server"
-version = "1.2.5.0"
+version = "1.2.5.1"
 description = "FastAPI server for WhisperX transcription with OpenAI-like API"
 readme = "README.md"
 requires-python = ">=3.10, <3.14"
@@ -37,6 +37,14 @@ metrics = [
     "prometheus-client>=0.21",
     "nvidia-ml-py>=12.0",
 ]
+
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["whisperx_api_server*"]
 
 [tool.uv]
 conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]

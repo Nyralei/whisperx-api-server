@@ -236,6 +236,16 @@ class KafkaConfig(BaseModel):
     max_pending_jobs: int = Field(default=100)
     # Must match broker KAFKA_MESSAGE_MAX_BYTES (default 50 MiB).
     max_message_bytes: int = Field(default=52428800)
+    # How long (seconds) the /info worker-discovery result is cached before
+    # re-querying the Kafka admin API.
+    discovery_cache_ttl_seconds: float = Field(default=10.0, gt=0)
+    # Partition count / replication factor used when the API pre-creates the
+    # request/reply topics on startup. Pre-creation closes a bootstrap-order
+    # gap: workers that connect before the first produce join the consumer
+    # group with a 0-partition assignment and stay idle until aiokafka's
+    # metadata_max_age_ms refresh fires (default ~5 min).
+    topic_partitions: int = Field(default=20, gt=0)
+    topic_replication_factor: int = Field(default=1, gt=0)
 
 
 class S3Config(BaseModel):

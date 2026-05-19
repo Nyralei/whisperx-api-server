@@ -26,6 +26,7 @@ from whisperx_api_server.backends.registry import (
 )
 
 from whisperx_api_server.routers.observability import (
+    info_router,
     router as observability_router,
 )
 
@@ -292,6 +293,7 @@ def create_app() -> FastAPI:
     # Observability router hosts unauthenticated /healthcheck (and /metrics when
     # METRICS_ENABLED=true — /metrics is registered directly on `app` below).
     app.include_router(observability_router)
+    app.include_router(info_router, dependencies=dependencies)
 
     if config.metrics.enabled:
         from whisperx_api_server.observability.registry import (

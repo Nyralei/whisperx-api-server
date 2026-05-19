@@ -28,6 +28,7 @@ RUN python3 -m nltk.downloader -d $HOME/nltk_data punkt_tab
 ENV NLTK_DATA=$HOME/nltk_data
 
 COPY --chown=ubuntu src/whisperx_api_server ./whisperx_api_server
+RUN uv pip install --no-deps .
 
 RUN mkdir -p $HOME/.cache/huggingface && mkdir -p $HOME/.cache/torch
 ENV UVICORN_HOST=0.0.0.0

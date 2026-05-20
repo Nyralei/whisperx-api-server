@@ -298,6 +298,16 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
 
             job_id = event.get("job_id")
             if job_id:
+                # Apply the worker's authoritative per-stage timeline before
+                # resolving the future. mark_completed (called from
+                # transcribe_via_kafka after the future resolves) then runs
+                # against an already-finalized stages array, so worker.finalize
+                # and any other late stages are guaranteed to appear regardless
+                # of progress-topic delivery order.
+                timeline = event.get("timeline")
+                if timeline:
+                    request_status.apply_worker_timeline(job_id, timeline)
+
                 entry = _pending_jobs.pop(job_id, None)
                 _kafka.pending_jobs.set(len(_pending_jobs))
                 if entry is not None:

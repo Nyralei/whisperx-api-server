@@ -13,6 +13,7 @@ from whisperx_api_server.backends.registry import (
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
 import whisperx_api_server.s3_client as s3_client
+from whisperx_worker.health_server import WorkerReadiness, start_health_server
 from whisperx_worker.processor import process_job, serialize_result
 from whisperx_worker.progress import publish_stage
 
@@ -24,6 +25,12 @@ async def run_worker() -> None:
 
     config = get_config()
     setup_logger(config.log_level)
+
+    # Start the health server before any heavy init so probes can hit /healthcheck
+    # immediately and /ready reports the unmet gates (models_loaded, s3_initialized,
+    # kafka_subscribed) while the worker is still coming up.
+    readiness = WorkerReadiness()
+    health_runner = await start_health_server(readiness, config.worker_health_port)
 
     gpu_task: "asyncio.Task | None" = None
     if config.metrics.enabled:
@@ -84,6 +91,7 @@ async def run_worker() -> None:
         )
 
     await s3_client.init_client(config.s3)
+    readiness.s3_initialized.set()
 
     selected_backends = resolve_stage_backends()
     logger.info(
@@ -105,6 +113,8 @@ async def run_worker() -> None:
     except Exception:
         logger.exception(
             "Failed to preload diarization backend; will load on first job")
+    # Preload may fail (worker will lazy-load on first job); don't gate readiness on that.
+    readiness.models_loaded.set()
 
     consumer = AIOKafkaConsumer(
         bootstrap_servers=config.kafka.bootstrap_servers,
@@ -149,6 +159,7 @@ async def run_worker() -> None:
         topics=[config.kafka.request_topic],
         listener=_PauseAwareRebalanceListener(),
     )
+    readiness.kafka_subscribed.set()
     logger.info(
         f"Worker ready — topic: {config.kafka.request_topic}, "
         f"group: {config.kafka.consumer_group_worker}, "
@@ -188,11 +199,13 @@ async def run_worker() -> None:
 
                 try:
                     reply: dict = {"job_id": job_id}
+                    timeline: dict[str, dict[str, float]] = {}
                     try:
                         result = await process_job(
                             event,
                             progress_producer=producer,
                             progress_topic=config.kafka.progress_topic,
+                            timeline_out=timeline,
                         )
                         reply["status"] = "ok"
                         reply["result"] = result
@@ -204,6 +217,11 @@ async def run_worker() -> None:
                         # exceptions (e.g. InvalidAudioError → HTTP 422) instead
                         # of collapsing every worker failure to RuntimeError/500.
                         reply["error_type"] = type(exc).__name__
+                    # Authoritative per-stage timeline (wall-clock from worker pod).
+                    # Always include — even on failure — so the API has the partial
+                    # progress history when the job didn't complete.
+                    if timeline:
+                        reply["timeline"] = timeline
 
                     # Best-effort terminal progress event (the API tracker
                     # also calls mark_completed/mark_failed off the reply
@@ -259,6 +277,8 @@ async def run_worker() -> None:
         await consumer.stop()
         await producer.stop()
         await s3_client.close_client()
+        with contextlib.suppress(Exception):
+            await health_runner.cleanup()
         logger.info("Worker shut down")
 
 

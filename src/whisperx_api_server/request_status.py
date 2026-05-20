@@ -119,8 +119,12 @@ def set_stage(request_id: str, stage: str) -> None:
         state = _states.get(request_id)
         if state is None or _is_terminal(state):
             return
-        _close_active_stage(state, now)
         stages = state.setdefault("stages", [])
+        # Idempotency: if this stage was already authoritatively recorded (e.g.
+        # apply_worker_timeline ran ahead of a late progress event), skip.
+        if any(s.get("name") == stage and not s.get("in_progress") for s in stages):
+            return
+        _close_active_stage(state, now)
         stages.append({"name": stage, "started_at": now, "in_progress": True})
         state["stage"] = stage
         state["status"] = _STATUS_IN_PROGRESS
@@ -139,6 +143,7 @@ def mark_completed(request_id: str) -> None:
             return
         _close_active_stage(state, now)
         state["status"] = _STATUS_COMPLETED
+        state["stage"] = _STATUS_COMPLETED
         state["completed_at"] = now
         state["updated_at"] = now
 
@@ -155,10 +160,84 @@ def mark_failed(request_id: str, error: str, error_type: str | None = None) -> N
             return
         _close_active_stage(state, now)
         state["status"] = _STATUS_FAILED
+        state["stage"] = _STATUS_FAILED
         state["error"] = error
         state["error_type"] = error_type
         state["completed_at"] = now
         state["updated_at"] = now
+
+
+def apply_worker_timeline(
+    request_id: str,
+    timeline: dict[str, dict[str, float]],
+    *,
+    prefix: str = "worker.",
+) -> None:
+    """Reconcile the local stages array with an authoritative worker timeline.
+
+    Called by the API reply consumer when a Kafka worker reply lands. The
+    worker's per-stage wall-clock timestamps are the source of truth for
+    everything that happened inside the worker — they don't depend on the
+    progress topic winning the race against the reply topic.
+
+    Behavior:
+      - Removes any existing entries with names starting with ``prefix``
+        (provisional entries written by the progress consumer with API-side
+        approximate timing).
+      - Closes any preceding in-progress API-side stages (e.g. ``awaiting_worker``)
+        at the first worker stage's started_at, since that's when control actually
+        passed to the worker.
+      - Appends authoritative worker stages in insertion order from ``timeline``.
+      - Idempotent — safe to call multiple times or with partial timelines.
+    """
+    if not request_id or not timeline:
+        return
+    with _lock:
+        state = _states.get(request_id)
+        if state is None:
+            return
+
+        stages: list[dict[str, Any]] = state.setdefault("stages", [])
+
+        # Find the earliest worker stage start — that's when API-side
+        # "awaiting_worker" (or any prior in-progress stage) effectively ended.
+        worker_starts = [
+            e["started_at"] for e in timeline.values()
+            if e.get("started_at") is not None
+        ]
+        if not worker_starts:
+            return
+        handover_ts = min(worker_starts)
+
+        # Close any preceding API-side in-progress stages at the handover boundary.
+        for s in stages:
+            if s.get("in_progress") and not s.get("name", "").startswith(prefix):
+                s["in_progress"] = False
+                s["completed_at"] = handover_ts
+                started = s.get("started_at")
+                if started is not None:
+                    s["duration_seconds"] = round(handover_ts - started, 4)
+
+        # Drop any existing worker.* entries; reinsert from the authoritative timeline.
+        state["stages"] = [
+            s for s in stages if not s.get("name", "").startswith(prefix)
+        ]
+        for stage_name, entry in timeline.items():
+            started_at = entry.get("started_at")
+            completed_at = entry.get("completed_at")
+            if started_at is None:
+                continue
+            new_entry: dict[str, Any] = {
+                "name": f"{prefix}{stage_name}",
+                "started_at": started_at,
+                "in_progress": completed_at is None,
+            }
+            if completed_at is not None:
+                new_entry["completed_at"] = completed_at
+                new_entry["duration_seconds"] = round(completed_at - started_at, 4)
+            state["stages"].append(new_entry)
+
+        state["updated_at"] = _now()
 
 
 def get(request_id: str) -> dict[str, Any] | None:

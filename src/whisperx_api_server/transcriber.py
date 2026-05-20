@@ -465,7 +465,7 @@ async def transcribe_via_kafka(
     request_status.set_stage(request_id, "uploading_to_s3")
     logger.info(f"Request ID: {request_id} - Uploading audio to S3")
     try:
-        s3_key = await s3_client.upload_audio_stream(audio_file.file, request_id, safe_name)
+        s3_key = await s3_client.upload_audio_stream(audio_file, request_id, safe_name)
     except Exception as e:
         request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise

@@ -89,12 +89,30 @@ async def upload_audio(data: bytes, job_id: str, filename: str) -> str:
     return key
 
 
-async def upload_audio_stream(fileobj, job_id: str, filename: str) -> str:
+async def upload_audio_stream(upload_file, job_id: str, filename: str) -> str:
+    """Upload a FastAPI UploadFile to S3 without blocking the event loop.
+
+    Passing the SpooledTemporaryFile directly as aiobotocore's Body serializes
+    concurrent uploads: aiohttp's request body iteration calls fileobj.read()
+    inline in the async path, so the loop stalls while bytes are pulled. Reading
+    via UploadFile.read() instead routes through anyio's thread executor, so
+    multiple concurrent uploads interleave. We then hand aiobotocore a plain
+    bytes Body, which aiohttp sends without any further blocking I/O.
+
+    Memory: peak buffered bytes are bounded by kafka.max_pending_jobs * payload
+    size (default 100 * audio file size). SpooledTemporaryFile spills to disk
+    above 1MB so the source was never strictly disk-only for small files; this
+    swap turns the small-file case into RAM-only and pulls large files fully
+    into RAM at upload time. Adjust kafka.max_pending_jobs if that ceiling is
+    too high for the deployment's typical file sizes.
+    """
     if _client is None or _config is None:
         raise RuntimeError("S3 client not initialized")
     key = f"audio/{job_id}/{filename}"
-    await _client.put_object(Bucket=_config.bucket, Key=key, Body=fileobj)
-    logger.debug(f"Uploaded stream to s3://{_config.bucket}/{key}")
+
+    data = await upload_file.read()
+    await _client.put_object(Bucket=_config.bucket, Key=key, Body=data)
+    logger.debug(f"Uploaded {len(data)} bytes to s3://{_config.bucket}/{key}")
     return key
 
 

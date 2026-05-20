@@ -48,6 +48,7 @@ async def process_job(
     *,
     progress_producer: Any = None,
     progress_topic: str | None = None,
+    timeline_out: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     job_id = event["job_id"]
     s3_key = event["s3_key"]
@@ -61,9 +62,28 @@ async def process_job(
     audio = None
     concurrency_sem = _get_concurrency_semaphore()
     profile: dict[str, float] = {}
+    # timeline carries wall-clock (time.time()) per-stage timestamps back to the
+    # API server in the reply, so the request_status tracker has an authoritative
+    # source of truth that doesn't depend on the progress topic winning the race
+    # against the reply topic. Dict preserves insertion order.
+    if timeline_out is None:
+        timeline_out = {}
 
     async def _progress(stage: str) -> None:
+        t = time.time()
+        if timeline_out:
+            last_name = next(reversed(timeline_out))
+            if timeline_out[last_name].get("completed_at") is None:
+                timeline_out[last_name]["completed_at"] = t
+        timeline_out[stage] = {"started_at": t, "completed_at": None}
         await publish_stage(progress_producer, progress_topic or "", job_id, stage)
+
+    def _close_timeline() -> None:
+        if not timeline_out:
+            return
+        last_name = next(reversed(timeline_out))
+        if timeline_out[last_name].get("completed_at") is None:
+            timeline_out[last_name]["completed_at"] = time.time()
 
     try:
         await _progress("s3_download")
@@ -171,6 +191,7 @@ async def process_job(
                 concurrency_sem.release()
 
     finally:
+        _close_timeline()
         if config.audio_cleanup and audio is not None:
             del audio
             logger.info(f"Job {job_id}: audio data cleaned up")

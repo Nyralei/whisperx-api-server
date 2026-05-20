@@ -17,6 +17,8 @@ x-api-base: &api-base
     dockerfile: Dockerfile.cpu
     args:
       UV_EXTRA_ARGS: "--extra kafka"
+  env_file:
+    - .env
   depends_on:
     kafka:
       condition: service_healthy
@@ -47,6 +49,8 @@ x-worker-cuda-base: &worker-cuda-base
   build:
     context: .
     dockerfile: Dockerfile.worker-cuda
+  env_file:
+    - .env
   depends_on:
     kafka:
       condition: service_healthy
@@ -77,6 +81,8 @@ x-worker-cpu-base: &worker-cpu-base
   build:
     context: .
     dockerfile: Dockerfile.worker-cpu
+  env_file:
+    - .env
   depends_on:
     kafka:
       condition: service_healthy

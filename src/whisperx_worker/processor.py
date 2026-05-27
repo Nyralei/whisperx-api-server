@@ -21,6 +21,7 @@ from whisperx_api_server.transcriber import (
     _cleanup_cache_only,
     _get_concurrency_semaphore,
 )
+from whisperx_api_server import url_fetch
 import whisperx_api_server.s3_client as s3_client
 from whisperx_worker.progress import publish_stage
 
@@ -51,7 +52,12 @@ async def process_job(
     timeline_out: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     job_id = event["job_id"]
-    s3_key = event["s3_key"]
+    s3_key = event.get("s3_key")
+    audio_url = event.get("audio_url")
+    if bool(s3_key) == bool(audio_url):
+        raise ValueError(
+            f"Job {job_id}: event must specify exactly one of s3_key or audio_url"
+        )
     filename = event.get("filename", "audio")
     params = event["params"]
 
@@ -86,13 +92,31 @@ async def process_job(
             timeline_out[last_name]["completed_at"] = time.time()
 
     try:
-        await _progress("s3_download")
-        t0 = time.perf_counter()
-        logger.info(f"Job {job_id}: downloading audio from S3 (key: {s3_key})")
-        audio_bytes = await s3_client.download_audio(s3_key)
-        profile["s3_download"] = time.perf_counter() - t0
-        logger.info(
-            f"Job {job_id}: S3 download took {profile['s3_download']:.2f} seconds")
+        if audio_url is not None:
+            await _progress("url_download")
+            t0 = time.perf_counter()
+            logger.info(f"Job {job_id}: downloading audio from URL")
+            audio_bytes = await url_fetch.download_url_to_bytes(
+                audio_url,
+                job_id,
+                max_bytes=config.max_upload_size_bytes,
+                connect_timeout=config.url_fetch_connect_timeout_seconds,
+                total_timeout=config.url_fetch_timeout_seconds,
+                allow_private_hosts=config.url_fetch_allow_private_hosts,
+                allowed_hosts=config.url_fetch_allowed_hosts,
+            )
+            profile["url_download"] = time.perf_counter() - t0
+            logger.info(
+                f"Job {job_id}: URL download took {profile['url_download']:.2f} seconds")
+        else:
+            await _progress("s3_download")
+            t0 = time.perf_counter()
+            logger.info(
+                f"Job {job_id}: downloading audio from S3 (key: {s3_key})")
+            audio_bytes = await s3_client.download_audio(s3_key)
+            profile["s3_download"] = time.perf_counter() - t0
+            logger.info(
+                f"Job {job_id}: S3 download took {profile['s3_download']:.2f} seconds")
 
         await _progress("audio_load")
         t0 = time.perf_counter()

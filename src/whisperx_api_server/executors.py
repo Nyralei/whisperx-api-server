@@ -13,7 +13,8 @@ def get_model_executor() -> ThreadPoolExecutor:
         from whisperx_api_server.dependencies import get_config
         config = get_config()
         n = max(1, config.max_concurrent_transcriptions)
-        _model_executor = ThreadPoolExecutor(max_workers=n, thread_name_prefix="wx-model")
+        _model_executor = ThreadPoolExecutor(
+            max_workers=n, thread_name_prefix="wx-model")
         logger.info("model thread pool: %d workers", n)
     return _model_executor
 
@@ -24,7 +25,8 @@ def get_io_executor() -> ThreadPoolExecutor:
         from whisperx_api_server.dependencies import get_config
         config = get_config()
         n = min(32, 4 * max(1, config.max_concurrent_transcriptions))
-        _io_executor = ThreadPoolExecutor(max_workers=n, thread_name_prefix="wx-io")
+        _io_executor = ThreadPoolExecutor(
+            max_workers=n, thread_name_prefix="wx-io")
         logger.info("IO thread pool: %d workers", n)
     return _io_executor
 

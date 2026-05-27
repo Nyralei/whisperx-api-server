@@ -39,7 +39,8 @@ _concurrency_semaphore: asyncio.Semaphore | None = None
 _decode_semaphore: asyncio.Semaphore | None = None
 _UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 _UPLOAD_WRITE_BUFFER_SIZE = 1024 * 1024  # 1 MiB
-_UPLOAD_WRITER_JOIN_TIMEOUT_SECS = 10  # writer thread should drain in <1s on healthy disk
+# writer thread should drain in <1s on healthy disk
+_UPLOAD_WRITER_JOIN_TIMEOUT_SECS = 10
 _FILENAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _FILENAME_MAX_SUFFIX_LEN = 64
 
@@ -101,7 +102,8 @@ def _ffmpeg_decode_cmd(input_arg: str, sample_rate: int) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "0"]
     if input_arg != "pipe:0":
         cmd.append("-nostdin")
-    cmd += ["-i", input_arg, "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "pipe:1"]
+    cmd += ["-i", input_arg, "-f", "f32le", "-ac",
+            "1", "-ar", str(sample_rate), "pipe:1"]
     return cmd
 
 
@@ -146,7 +148,8 @@ async def _run_ffmpeg_decode(
     if rc != 0:
         msg = err.decode(errors="replace").strip()
         logger.warning(f"Request ID: {request_id} - ffmpeg exited {rc}: {msg}")
-        raise InvalidAudioError(f"Could not decode audio (ffmpeg exit {rc}): {msg}")
+        raise InvalidAudioError(
+            f"Could not decode audio (ffmpeg exit {rc}): {msg}")
 
     audio = np.frombuffer(pcm, dtype=np.float32).copy()
     if audio.size == 0:
@@ -262,7 +265,7 @@ def _finalize_text(result: dict[str, Any], align_or_diarize: bool) -> dict[str, 
 
 
 async def transcribe(
-    audio_file: UploadFile,
+    audio_file: UploadFile | None = None,
     batch_size: int = config.whisper.batch_size,
     chunk_size: int = config.whisper.chunk_size,
     asr_options: dict | None = None,
@@ -273,7 +276,11 @@ async def transcribe(
     speaker_embeddings: bool = False,
     request_id: str = "",
     task: str = "transcribe",
+    source_url: str | None = None,
 ) -> dict[str, Any]:
+    if bool(audio_file) == bool(source_url):
+        raise ValueError(
+            "transcribe requires exactly one of audio_file or source_url")
     start_time = time.perf_counter()
     file_path = None
     audio = None
@@ -281,16 +288,34 @@ async def transcribe(
     decode_sem = _get_decode_semaphore()
     profile: dict[str, float] = {}
     audio_duration_seconds = 0.0
+    if audio_file is not None:
+        source_label = audio_file.filename
+    else:
+        from whisperx_api_server import url_fetch
+        source_label = url_fetch.filename_from_url(source_url)
 
+    stage_name = "url_download" if source_url is not None else "upload_save"
     try:
-        request_status.set_stage(request_id, "upload_save")
+        request_status.set_stage(request_id, stage_name)
         t0 = time.perf_counter()
-        file_path = await _save_upload_to_temp(audio_file, request_id)
-        profile["upload_save"] = time.perf_counter() - t0
+        if source_url is not None:
+            from whisperx_api_server import url_fetch
+            file_path = await url_fetch.download_url_to_temp(
+                source_url,
+                request_id,
+                max_bytes=config.max_upload_size_bytes,
+                connect_timeout=config.url_fetch_connect_timeout_seconds,
+                total_timeout=config.url_fetch_timeout_seconds,
+                allow_private_hosts=config.url_fetch_allow_private_hosts,
+                allowed_hosts=config.url_fetch_allowed_hosts,
+            )
+        else:
+            file_path = await _save_upload_to_temp(audio_file, request_id)
+        profile[stage_name] = time.perf_counter() - t0
         logger.info(
-            f"Request ID: {request_id} - Saving uploaded file took {profile['upload_save']:.2f} seconds")
+            f"Request ID: {request_id} - Saving source took {profile[stage_name]:.2f} seconds")
         _pipe.stage_duration.labels(
-            stage="upload_save").observe(profile["upload_save"])
+            stage=stage_name).observe(profile[stage_name])
 
         # Decode outside the inference semaphore, bounded by the decode-admission semaphore.
         async with contextlib.AsyncExitStack() as _decode_stack:
@@ -332,7 +357,7 @@ async def transcribe(
             model_name = get_default_transcription_model_name()
 
         logger.info(
-            f"Request ID: {request_id} - Transcribing {audio_file.filename} with model: {model_name}, options: {asr_options}, language: {language}, task: {task}, stage_backends: {selected_backends}")
+            f"Request ID: {request_id} - Transcribing {source_label} with model: {model_name}, options: {asr_options}, language: {language}, task: {task}, stage_backends: {selected_backends}")
 
         _sem_t0 = time.perf_counter()
         if concurrency_sem:
@@ -388,7 +413,8 @@ async def transcribe(
 
             if diarize:
                 if diarization_stage_backend is None:
-                    raise RuntimeError("Diarization backend is not initialized.")
+                    raise RuntimeError(
+                        "Diarization backend is not initialized.")
                 request_status.set_stage(request_id, "diarize")
                 t0 = time.perf_counter()
                 result = await diarization_stage_backend.diarize(
@@ -414,7 +440,7 @@ async def transcribe(
 
             total = time.perf_counter() - start_time
             logger.info(
-                f"Request ID: {request_id} - Transcription completed for {audio_file.filename}")
+                f"Request ID: {request_id} - Transcription completed for {source_label}")
             logger.debug(
                 f"Request ID: {request_id} - profile: total={total:.2f}s | "
                 + " | ".join(f"{k}={v:.2f}s" for k, v in profile.items())
@@ -427,7 +453,7 @@ async def transcribe(
                 concurrency_sem.release()
     except Exception as e:
         logger.error(
-            f"Request ID: {request_id} - Transcription failed for {audio_file.filename} with error: {e}")
+            f"Request ID: {request_id} - Transcription failed for {source_label} with error: {e}")
         request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise
     finally:
@@ -447,11 +473,15 @@ class QueueFullError(Exception):
 
 
 async def transcribe_via_kafka(
-    audio_file: UploadFile,
+    audio_file: UploadFile | None = None,
     *,
     params: dict[str, Any],
     request_id: str,
+    source_url: str | None = None,
 ) -> dict[str, Any]:
+    if bool(audio_file) == bool(source_url):
+        raise ValueError(
+            "transcribe_via_kafka requires exactly one of audio_file or source_url")
     max_pending = config.kafka.max_pending_jobs
     if max_pending > 0 and len(kafka_client._pending_jobs) >= max_pending:
         _kafka.queue_rejected_total.inc()
@@ -461,20 +491,29 @@ async def transcribe_via_kafka(
         request_status.mark_failed(request_id, str(err), "QueueFullError")
         raise err
 
-    safe_name = _safe_filename(audio_file.filename)
-    request_status.set_stage(request_id, "uploading_to_s3")
-    logger.info(f"Request ID: {request_id} - Uploading audio to S3")
-    try:
-        s3_key = await s3_client.upload_audio_stream(audio_file, request_id, safe_name)
-    except Exception as e:
-        request_status.mark_failed(request_id, str(e), type(e).__name__)
-        raise
+    if source_url is not None:
+        from whisperx_api_server import url_fetch
+        safe_name = url_fetch.filename_from_url(source_url)
+        s3_key: str | None = None
+        logger.info(
+            f"Request ID: {request_id} - Forwarding source URL to worker (skipping S3 upload)")
+    else:
+        safe_name = _safe_filename(audio_file.filename)
+        request_status.set_stage(request_id, "uploading_to_s3")
+        logger.info(f"Request ID: {request_id} - Uploading audio to S3")
+        try:
+            s3_key = await s3_client.upload_audio_stream(audio_file, request_id, safe_name)
+        except Exception as e:
+            request_status.mark_failed(request_id, str(e), type(e).__name__)
+            raise
 
     request_status.set_stage(request_id, "submitted_to_kafka")
     logger.info(
-        f"Request ID: {request_id} - Submitting job to Kafka (key: {s3_key})")
+        f"Request ID: {request_id} - Submitting job to Kafka (s3_key={s3_key}, audio_url={'set' if source_url else None})")
     try:
-        future = await kafka_client.submit_job(request_id, s3_key, safe_name, params)
+        future = await kafka_client.submit_job(
+            request_id, s3_key, source_url, safe_name, params
+        )
     except Exception as e:
         request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise

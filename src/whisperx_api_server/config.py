@@ -350,6 +350,18 @@ class Config(BaseSettings):
     # on disk before rejecting.
     max_upload_size_bytes: int = Field(default=0, ge=0)
 
+    # Total ceiling for fetching audio_url bodies (seconds). Includes the entire
+    # download — connect + transfer.
+    url_fetch_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Connect-phase timeout for fetching audio_url bodies (seconds).
+    url_fetch_connect_timeout_seconds: float = Field(default=15.0, gt=0)
+    # Deny by default: reject audio_url targets that resolve to private,
+    # loopback, link-local, multicast, reserved, or unspecified IPs. Operators
+    # who legitimately fetch from internal storage can flip this on, or use
+    # url_fetch_allowed_hosts for an explicit hostname allowlist.
+    url_fetch_allow_private_hosts: bool = Field(default=False)
+    url_fetch_allowed_hosts: list[str] = Field(default_factory=list)
+
     # On SIGTERM, refuse new requests with HTTP 503 and wait up to this many
     # seconds for in-flight work to drain before tearing down. Best-effort on
     # Windows (signal handlers raise NotImplementedError under ProactorEventLoop).

@@ -106,7 +106,8 @@ class WhisperXTranscriptionBackend:
         # post-pop callers serialize behind us, and once we release the lock
         # they would still see a torn-down model. Acceptable: the request
         # would either succeed on CPU or surface a backend error mapped to 5xx.
-        to_remove = [k for k in transcribe_pipeline_instances if k[0] == model_name]
+        to_remove = [
+            k for k in transcribe_pipeline_instances if k[0] == model_name]
         if not to_remove:
             return False
         for cache_key in to_remove:

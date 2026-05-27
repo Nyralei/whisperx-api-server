@@ -83,7 +83,8 @@ async def run_worker() -> None:
     sigterm_registered = False
     try:
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, _request_worker_shutdown, "SIGTERM")
+        loop.add_signal_handler(
+            signal.SIGTERM, _request_worker_shutdown, "SIGTERM")
         sigterm_registered = True
     except NotImplementedError:
         logger.info(

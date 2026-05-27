@@ -4,6 +4,7 @@ from .models import handle_default_openai_model
 from fastapi import (
     APIRouter,
     UploadFile,
+    File,
     Form,
     HTTPException,
     Request,
@@ -21,6 +22,7 @@ from whisperx_api_server.transcriber import (
     QueueFullError,
     UploadTooLargeError,
 )
+from whisperx_api_server.url_fetch import filename_from_url
 from whisperx_api_server import request_status
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
@@ -44,10 +46,12 @@ def _raise_for_transcription_error(request_id: str, e: Exception, kind: str) -> 
     """Map domain exceptions to specific HTTP codes; fall through to 500."""
     if isinstance(e, InvalidAudioError):
         logger.info(f"Request ID: {request_id} - Invalid audio: {e}")
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
     if isinstance(e, UploadTooLargeError):
         logger.info(f"Request ID: {request_id} - Upload too large: {e}")
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e
     if isinstance(e, QueueFullError):
         logger.warning(f"Request ID: {request_id} - Queue full: {e}")
         raise HTTPException(
@@ -56,7 +60,8 @@ def _raise_for_transcription_error(request_id: str, e: Exception, kind: str) -> 
         ) from e
     if isinstance(e, asyncio.TimeoutError) or isinstance(e, TimeoutError):
         logger.warning(f"Request ID: {request_id} - Timeout: {e}")
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)) from e
     if isinstance(e, _CUDA_OOM_EXC) and "out of memory" in str(e).lower():
         logger.error(f"Request ID: {request_id} - CUDA OOM: {e}")
         raise HTTPException(
@@ -68,6 +73,7 @@ def _raise_for_transcription_error(request_id: str, e: Exception, kind: str) -> 
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"An unexpected error occurred while processing the {kind} request.",
     ) from e
+
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +137,8 @@ Returns:
 )
 async def transcribe_audio(
     request: Request,
-    file: UploadFile,
+    file: Annotated[UploadFile | None, File()] = None,
+    audio_url: Annotated[str | None, Form()] = None,
     model: Annotated[ModelName,
                      Form()] = get_default_transcription_model_name(),
     language: Annotated[Language, Form()] = config.default_language,
@@ -158,10 +165,25 @@ async def transcribe_audio(
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()
+    use_url = bool(audio_url)
+    if not use_url and (file is None or not file.filename):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide either 'file' or 'audio_url'.",
+        )
+    if use_url and file is not None and file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide exactly one of 'file' or 'audio_url', not both.",
+        )
+    if use_url:
+        source_filename = filename_from_url(audio_url)
+    else:
+        source_filename = file.filename
     request_status.start(
         request_id,
         mode=config.mode.value,
-        filename=file.filename,
+        filename=source_filename,
         params={
             "endpoint": "transcriptions",
             "model": model,
@@ -170,7 +192,7 @@ async def transcribe_audio(
             "diarize": diarize,
         },
     )
-    logger.info(f"Request ID: {request_id} - Received request to transcribe {file.filename} with parameters: \
+    logger.info(f"Request ID: {request_id} - Received request to transcribe {source_filename} with parameters: \
         model: {model}, \
         language: {language}, \
         prompt: {prompt}, \
@@ -228,11 +250,15 @@ async def transcribe_audio(
                 "asr_options": asr_options,
             }
             transcription = await transcriber.transcribe_via_kafka(
-                audio_file=file, params=params, request_id=request_id
+                audio_file=None if use_url else file,
+                source_url=audio_url if use_url else None,
+                params=params,
+                request_id=request_id,
             )
         else:
             transcription = await transcriber.transcribe(
-                audio_file=file,
+                audio_file=None if use_url else file,
+                source_url=audio_url if use_url else None,
                 batch_size=batch_size,
                 asr_options=asr_options,
                 language=language,
@@ -244,7 +270,8 @@ async def transcribe_audio(
                 request_id=request_id,
             )
     except asyncio.CancelledError:
-        logger.info(f"Request ID: {request_id} - Client disconnected; cancelling")
+        logger.info(
+            f"Request ID: {request_id} - Client disconnected; cancelling")
         raise
     except Exception as e:
         _raise_for_transcription_error(request_id, e, "transcription")
@@ -279,7 +306,8 @@ Returns:
 )
 async def translate_audio(
     request: Request,
-    file: UploadFile,
+    file: Annotated[UploadFile | None, File()] = None,
+    audio_url: Annotated[str | None, Form()] = None,
     model: Annotated[ModelName,
                      Form()] = get_default_transcription_model_name(),
     prompt: Annotated[str, Form()] = "",
@@ -292,16 +320,31 @@ async def translate_audio(
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received translation request")
     start_time = time.time()
+    use_url = bool(audio_url)
+    if not use_url and (file is None or not file.filename):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide either 'file' or 'audio_url'.",
+        )
+    if use_url and file is not None and file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide exactly one of 'file' or 'audio_url', not both.",
+        )
+    if use_url:
+        source_filename = filename_from_url(audio_url)
+    else:
+        source_filename = file.filename
     request_status.start(
         request_id,
         mode=config.mode.value,
-        filename=file.filename,
+        filename=source_filename,
         params={
             "endpoint": "translations",
             "model": model,
         },
     )
-    logger.info(f"Request ID: {request_id} - Received request to translate {file.filename} with parameters: \
+    logger.info(f"Request ID: {request_id} - Received request to translate {source_filename} with parameters: \
         model: {model}, \
         prompt: {prompt}, \
         response_format: {response_format}, \
@@ -328,11 +371,15 @@ async def translate_audio(
                 "asr_options": asr_options,
             }
             translation = await transcriber.transcribe_via_kafka(
-                audio_file=file, params=params, request_id=request_id
+                audio_file=None if use_url else file,
+                source_url=audio_url if use_url else None,
+                params=params,
+                request_id=request_id,
             )
         else:
             translation = await transcriber.transcribe(
-                audio_file=file,
+                audio_file=None if use_url else file,
+                source_url=audio_url if use_url else None,
                 batch_size=batch_size,
                 asr_options=asr_options,
                 model_name=model,
@@ -341,7 +388,8 @@ async def translate_audio(
                 task="translate",
             )
     except asyncio.CancelledError:
-        logger.info(f"Request ID: {request_id} - Client disconnected; cancelling")
+        logger.info(
+            f"Request ID: {request_id} - Client disconnected; cancelling")
         raise
     except Exception as e:
         _raise_for_transcription_error(request_id, e, "translation")

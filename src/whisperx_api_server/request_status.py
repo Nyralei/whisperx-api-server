@@ -63,7 +63,8 @@ def _enforce_capacity_locked(cap: int) -> None:
         return
     # Prefer to drop terminal entries (oldest first); fall back to in-flight
     # only if we still need room. updated_at is the eviction key.
-    items = sorted(_states.items(), key=lambda kv: kv[1].get("updated_at", 0.0))
+    items = sorted(_states.items(),
+                   key=lambda kv: kv[1].get("updated_at", 0.0))
     terminal_ids = [rid for rid, st in items if _is_terminal(st)]
     other_ids = [rid for rid, st in items if not _is_terminal(st)]
     to_remove = len(_states) - cap
@@ -234,7 +235,8 @@ def apply_worker_timeline(
             }
             if completed_at is not None:
                 new_entry["completed_at"] = completed_at
-                new_entry["duration_seconds"] = round(completed_at - started_at, 4)
+                new_entry["duration_seconds"] = round(
+                    completed_at - started_at, 4)
             state["stages"].append(new_entry)
 
         state["updated_at"] = _now()
@@ -283,7 +285,8 @@ async def cleanup_loop() -> None:
             try:
                 n = evict_expired()
                 if n:
-                    logger.debug("request_status: evicted %d expired entries", n)
+                    logger.debug(
+                        "request_status: evicted %d expired entries", n)
             except Exception:
                 logger.exception("request_status cleanup sweep failed")
     except asyncio.CancelledError:

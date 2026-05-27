@@ -219,7 +219,8 @@ async def lifespan(app: FastAPI):
             await asyncio.to_thread(nltk.download, "punkt_tab", quiet=True)
             logger.info("NLTK punkt_tab preloaded")
         except Exception:
-            logger.warning("NLTK punkt_tab preload failed; will be downloaded on first alignment request")
+            logger.warning(
+                "NLTK punkt_tab preload failed; will be downloaded on first alignment request")
 
     try:
         if config.mode == DistributedMode.KAFKA:

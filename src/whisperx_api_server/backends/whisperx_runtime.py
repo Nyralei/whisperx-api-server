@@ -199,7 +199,8 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
             vad_options=config.whisper.vad_options,
             download_root=config.whisper.download_root,
             local_files_only=config.whisper.local_files_only,
-            threads=_resolve_ct2_threads(config.whisper.cpu_threads, inference_device),
+            threads=_resolve_ct2_threads(
+                config.whisper.cpu_threads, inference_device),
             use_auth_token=config.hf_token,
         )
 

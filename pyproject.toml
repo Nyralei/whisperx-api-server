@@ -1,6 +1,6 @@
 [project]
 name = "whisperx-api-server"
-version = "1.2.5.4"
+version = "1.2.5.5"
 description = "FastAPI server for WhisperX transcription with OpenAI-like API"
 readme = "README.md"
 requires-python = ">=3.10, <3.14"
@@ -11,7 +11,7 @@ dependencies = [
     "pydantic>=2.12.3",
     "pydantic-settings>=2.11.0",
     "python-multipart>=0.0.20",
-    "whisperx~=3.8.5",
+    "whisperx~=3.8.6",
 ]
 
 [project.optional-dependencies]

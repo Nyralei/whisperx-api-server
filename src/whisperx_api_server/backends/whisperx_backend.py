@@ -332,12 +332,21 @@ class WhisperXDiarizationBackend:
                 diarize_segments, embeddings = await loop.run_in_executor(get_model_executor(), _run_diarization)
         finally:
             release_diarize_pipeline(config.diarization.model)
+
+        # whisperx alignment stores its output as a dict ({"segments": [...],
+        # "word_segments": [...]}) under result["segments"]; a passthrough/native aligner
+        # may instead leave a plain segment list there. assign_word_speakers reads
+        # .get("segments") and mutates the transcript dict in place (it may also set
+        # "speaker_embeddings"), so wrap a bare list before handing it over.
+        transcript = result["segments"]
+        if not isinstance(transcript, dict):
+            transcript = {"segments": transcript}
         # Lock released before CPU-only word assignment so the diarize slot is free sooner.
         result["segments"] = await loop.run_in_executor(
             get_io_executor(),
             lambda: whisperx_diarize.assign_word_speakers(
                 diarize_segments,
-                result["segments"],
+                transcript,
                 embeddings,
             ),
         )

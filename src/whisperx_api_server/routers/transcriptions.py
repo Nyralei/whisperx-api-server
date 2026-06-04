@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from .models import handle_default_openai_model
 from fastapi import (
     APIRouter,
     UploadFile,
@@ -12,7 +11,6 @@ from fastapi import (
 )
 from fastapi.responses import Response
 from typing import Literal, Annotated
-from pydantic import AfterValidator
 import time
 
 
@@ -26,9 +24,6 @@ from whisperx_api_server.url_fetch import filename_from_url
 from whisperx_api_server import request_status
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
-from whisperx_api_server.backends.registry import (
-    get_default_transcription_model_name,
-)
 from whisperx_api_server.config import (
     DistributedMode,
     Language,
@@ -81,8 +76,18 @@ config = get_config()
 
 router = APIRouter()
 
-# Annotated ModelName for validation and defaults
-ModelName = Annotated[str, AfterValidator(handle_default_openai_model)]
+# OpenAI clients send model="whisper-1" as a placeholder; treat that — and an omitted
+# model — as "unspecified" so the transcription backend's own default is used. The
+# default is resolved where the backend actually runs: the worker in Kafka mode
+# (whisperx_worker/processor.py) and transcriber.transcribe in direct mode. This keeps
+# the API independent of which transcription backend the worker is configured with.
+_OPENAI_PLACEHOLDER_MODEL = "whisper-1"
+
+
+def _requested_model(model: str | None) -> str | None:
+    if model is None or model == _OPENAI_PLACEHOLDER_MODEL:
+        return None
+    return model
 
 
 def get_timestamp_granularities(
@@ -111,7 +116,7 @@ OpenAI-like endpoint to transcribe audio files using the configured transcriptio
 Args:
     request (Request): The HTTP request object.
     file (UploadFile): The audio file to transcribe.
-    model (ModelName): The model to use for transcription.
+    model (str | None): Transcription model name; omit (or send "whisper-1") to use the backend default.
     language (Language): The language to use for the transcription. Defaults to "en".
     prompt (str): The prompt to use for the transcription.
     response_format (ResponseFormat): The response format to use for the transcription. Defaults to "json".
@@ -139,8 +144,7 @@ async def transcribe_audio(
     request: Request,
     file: Annotated[UploadFile | None, File()] = None,
     audio_url: Annotated[str | None, Form()] = None,
-    model: Annotated[ModelName,
-                     Form()] = get_default_transcription_model_name(),
+    model: Annotated[str | None, Form()] = None,
     language: Annotated[Language, Form()] = config.default_language,
     prompt: Annotated[str, Form()] = None,
     response_format: Annotated[ResponseFormat,
@@ -165,6 +169,7 @@ async def transcribe_audio(
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received transcription request")
     start_time = time.time()
+    model_name = _requested_model(model)
     use_url = bool(audio_url)
     if not use_url and (file is None or not file.filename):
         raise HTTPException(
@@ -186,14 +191,14 @@ async def transcribe_audio(
         filename=source_filename,
         params={
             "endpoint": "transcriptions",
-            "model": model,
+            "model": model_name,
             "language": language.value if language else None,
             "align": align,
             "diarize": diarize,
         },
     )
     logger.info(f"Request ID: {request_id} - Received request to transcribe {source_filename} with parameters: \
-        model: {model}, \
+        model: {model_name}, \
         language: {language}, \
         prompt: {prompt}, \
         response_format: {response_format}, \
@@ -239,7 +244,7 @@ async def transcribe_audio(
     try:
         if config.mode == DistributedMode.KAFKA:
             params = {
-                "model_name": model,
+                "model_name": model_name,
                 "language": language.value if language else None,
                 "task": "transcribe",
                 "align": align,
@@ -262,7 +267,7 @@ async def transcribe_audio(
                 batch_size=batch_size,
                 asr_options=asr_options,
                 language=language,
-                model_name=model,
+                model_name=model_name,
                 align=align,
                 diarize=diarize,
                 speaker_embeddings=speaker_embeddings,
@@ -288,7 +293,7 @@ OpenAI-like endpoint to translate audio files using the configured transcription
 Args:
     request (Request): The HTTP request object.
     file (UploadFile): The audio file to translate.
-    model (ModelName): The model to use for translation.
+    model (str | None): Translation model name; omit (or send "whisper-1") to use the backend default.
     prompt (str): The prompt to use for the translation.
     response_format (ResponseFormat): The response format to use for the translation. Defaults to "json".
     temperature (float): The temperature to use for the translation. Defaults to 0.0.
@@ -308,8 +313,7 @@ async def translate_audio(
     request: Request,
     file: Annotated[UploadFile | None, File()] = None,
     audio_url: Annotated[str | None, Form()] = None,
-    model: Annotated[ModelName,
-                     Form()] = get_default_transcription_model_name(),
+    model: Annotated[str | None, Form()] = None,
     prompt: Annotated[str, Form()] = "",
     response_format: Annotated[ResponseFormat,
                                Form()] = config.default_response_format,
@@ -320,6 +324,7 @@ async def translate_audio(
     request_id = request.state.request_id
     logger.info(f"Request ID: {request_id} - Received translation request")
     start_time = time.time()
+    model_name = _requested_model(model)
     use_url = bool(audio_url)
     if not use_url and (file is None or not file.filename):
         raise HTTPException(
@@ -341,11 +346,11 @@ async def translate_audio(
         filename=source_filename,
         params={
             "endpoint": "translations",
-            "model": model,
+            "model": model_name,
         },
     )
     logger.info(f"Request ID: {request_id} - Received request to translate {source_filename} with parameters: \
-        model: {model}, \
+        model: {model_name}, \
         prompt: {prompt}, \
         response_format: {response_format}, \
         temperature: {temperature}, \
@@ -360,7 +365,7 @@ async def translate_audio(
     try:
         if config.mode == DistributedMode.KAFKA:
             params = {
-                "model_name": model,
+                "model_name": model_name,
                 "language": None,
                 "task": "translate",
                 "align": False,
@@ -382,7 +387,7 @@ async def translate_audio(
                 source_url=audio_url if use_url else None,
                 batch_size=batch_size,
                 asr_options=asr_options,
-                model_name=model,
+                model_name=model_name,
                 chunk_size=chunk_size,
                 request_id=request_id,
                 task="translate",

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import gc
@@ -8,11 +10,12 @@ import re
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
-import torch
 from fastapi import UploadFile
+
+if TYPE_CHECKING:
+    import numpy as np
 
 import whisperx_api_server.kafka_client as kafka_client
 import whisperx_api_server.s3_client as s3_client
@@ -89,6 +92,10 @@ def _get_decode_semaphore() -> asyncio.Semaphore | None:
 
 def _cleanup_cache_only():
     gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -120,6 +127,8 @@ async def _run_ffmpeg_decode(
     request_id: str,
     sample_rate: int,
 ) -> np.ndarray:
+    import numpy as np
+
     proc = await asyncio.create_subprocess_exec(
         *_ffmpeg_decode_cmd(input_arg, sample_rate),
         stdin=asyncio.subprocess.PIPE if feed_stdin else asyncio.subprocess.DEVNULL,

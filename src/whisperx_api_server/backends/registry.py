@@ -49,7 +49,9 @@ def _try_auto_register_backend(backend_name: str) -> None:
         with _backend_registration_lock:
             _backend_registration_attempted.discard(normalized)
         raise BackendSelectionError(
-            f"Failed importing backend module '{module_name}': {e}"
+            f"Failed importing backend module '{module_name}': {e}. "
+            "If this is a missing ML dependency, install the ML extras "
+            "(whisperx-api-server[cpu] or [cuda])."
         ) from e
     except Exception as e:
         with _backend_registration_lock:

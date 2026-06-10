@@ -8,9 +8,9 @@ import time
 import uuid
 from typing import Any
 
+from whisperx_api_server import request_status
 from whisperx_api_server.config import KafkaConfig
 from whisperx_api_server.observability import kafka as _kafka
-from whisperx_api_server import request_status
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,10 @@ def _rehydrate_worker_error(error_type: str | None, message: str) -> BaseExcepti
     """
     if error_type:
         from whisperx_api_server.transcriber import (
-            InvalidAudioError, UploadTooLargeError,
+            InvalidAudioError,
+            UploadTooLargeError,
         )
+
         mapping: dict[str, type[BaseException]] = {
             "InvalidAudioError": InvalidAudioError,
             "UploadTooLargeError": UploadTooLargeError,
@@ -59,6 +61,7 @@ def _decode_assignment(raw: bytes | None) -> list[dict]:
         return []
     try:
         from kafka.protocol.group import ConsumerProtocolMemberAssignment
+
         decoded = ConsumerProtocolMemberAssignment.decode(raw)
         return [
             {"topic": topic, "partitions": list(partitions)}
@@ -66,7 +69,9 @@ def _decode_assignment(raw: bytes | None) -> list[dict]:
         ]
     except Exception:
         logger.debug(
-            "ConsumerProtocolMemberAssignment.decode failed; using fallback parser", exc_info=True)
+            "ConsumerProtocolMemberAssignment.decode failed; using fallback parser",
+            exc_info=True,
+        )
     try:
         offset = 0
         if len(raw) < 6:
@@ -82,20 +87,18 @@ def _decode_assignment(raw: bytes | None) -> list[dict]:
             offset += 2
             if offset + name_len + 4 > len(raw):
                 return result
-            topic = raw[offset:offset + name_len].decode("utf-8")
+            topic = raw[offset : offset + name_len].decode("utf-8")
             offset += name_len
             num_parts = struct.unpack_from(">i", raw, offset)[0]
             offset += 4
             if offset + 4 * num_parts > len(raw):
                 return result
-            partitions = list(struct.unpack_from(
-                f">{num_parts}i", raw, offset))
+            partitions = list(struct.unpack_from(f">{num_parts}i", raw, offset))
             offset += 4 * num_parts
             result.append({"topic": topic, "partitions": partitions})
         return result
     except Exception:
-        logger.debug(
-            "_decode_assignment fallback parser failed", exc_info=True)
+        logger.debug("_decode_assignment fallback parser failed", exc_info=True)
         return []
 
 
@@ -126,13 +129,11 @@ async def describe_workers(timeout: float = 5.0) -> dict:
 
         try:
             groups = await asyncio.wait_for(
-                _admin.describe_consumer_groups(
-                    [_config.consumer_group_worker]),
+                _admin.describe_consumer_groups([_config.consumer_group_worker]),
                 timeout=timeout,
             )
         except Exception as e:
-            logger.warning("describe_workers failed: %s: %s",
-                           type(e).__name__, e)
+            logger.warning("describe_workers failed: %s: %s", type(e).__name__, e)
             return {
                 "workers": [],
                 "error_type": type(e).__name__,
@@ -147,14 +148,17 @@ async def describe_workers(timeout: float = 5.0) -> dict:
                 members = group_tuple[5] if len(group_tuple) > 5 else []
                 for m in members or []:
                     # member tuple: (member_id, client_id, client_host, metadata, assignment)
-                    workers.append({
-                        "member_id": m[0] if len(m) > 0 else None,
-                        "client_id": m[1] if len(m) > 1 else None,
-                        "host": m[2] if len(m) > 2 else None,
-                        "assignments": _decode_assignment(m[4] if len(m) > 4 else None),
-                    })
-        result = {"workers": workers,
-                  "error_type": None, "error_message": None}
+                    workers.append(
+                        {
+                            "member_id": m[0] if len(m) > 0 else None,
+                            "client_id": m[1] if len(m) > 1 else None,
+                            "host": m[2] if len(m) > 2 else None,
+                            "assignments": _decode_assignment(
+                                m[4] if len(m) > 4 else None
+                            ),
+                        }
+                    )
+        result = {"workers": workers, "error_type": None, "error_message": None}
         _discovery_cache = (time.monotonic(), result)
         return result
 
@@ -188,13 +192,18 @@ async def _ensure_topics(cfg: KafkaConfig) -> None:
         await _admin.create_topics(topics)
         logger.info(
             "Kafka topics ensured: %s, %s, %s (partitions=%d, rf=%d)",
-            cfg.request_topic, cfg.reply_topic, cfg.progress_topic,
-            cfg.topic_partitions, cfg.topic_replication_factor,
+            cfg.request_topic,
+            cfg.reply_topic,
+            cfg.progress_topic,
+            cfg.topic_partitions,
+            cfg.topic_replication_factor,
         )
     except TopicAlreadyExistsError:
         logger.info(
             "Kafka topics already exist: %s, %s, %s",
-            cfg.request_topic, cfg.reply_topic, cfg.progress_topic,
+            cfg.request_topic,
+            cfg.reply_topic,
+            cfg.progress_topic,
         )
     except Exception:
         # Non-fatal: if topic creation fails (e.g. permissions) the broker's
@@ -213,8 +222,7 @@ async def start(cfg: KafkaConfig) -> None:
 
     _admin = AIOKafkaAdminClient(bootstrap_servers=cfg.bootstrap_servers)
     await _admin.start()
-    logger.info("Kafka admin client started (brokers: %s)",
-                cfg.bootstrap_servers)
+    logger.info("Kafka admin client started (brokers: %s)", cfg.bootstrap_servers)
 
     await _ensure_topics(cfg)
 
@@ -251,8 +259,7 @@ async def submit_job(
     if _producer is None or _config is None:
         raise RuntimeError("Kafka producer not initialized")
     if bool(s3_key) == bool(audio_url):
-        raise ValueError(
-            "submit_job requires exactly one of s3_key or audio_url")
+        raise ValueError("submit_job requires exactly one of s3_key or audio_url")
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()
     _pending_jobs[job_id] = (future, time.monotonic())
@@ -275,7 +282,7 @@ async def submit_job(
         _pending_jobs.pop(job_id, None)
         _kafka.pending_jobs.set(len(_pending_jobs))
         raise
-    logger.debug(f"Job {job_id}: published to {_config.request_topic}")
+    logger.debug("Job %s: published to %s", job_id, _config.request_topic)
     return future
 
 
@@ -306,8 +313,7 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
             try:
                 event = json.loads(msg.value)
             except Exception:
-                logger.warning(
-                    "Reply consumer: failed to parse message, skipping")
+                logger.warning("Reply consumer: failed to parse message, skipping")
                 await consumer.commit()
                 continue
 
@@ -331,18 +337,21 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
                         duration = time.monotonic() - submit_time
                         if event.get("status") == "ok":
                             future.set_result(event["result"])
-                            _kafka.job_duration.labels(
-                                status="ok").observe(duration)
-                            logger.debug(f"Job {job_id}: resolved from reply")
+                            _kafka.job_duration.labels(status="ok").observe(duration)
+                            logger.debug("Job %s: resolved from reply", job_id)
                         else:
-                            future.set_exception(_rehydrate_worker_error(
-                                event.get("error_type"),
-                                event.get("error", "worker error"),
-                            ))
-                            _kafka.job_duration.labels(
-                                status="error").observe(duration)
+                            future.set_exception(
+                                _rehydrate_worker_error(
+                                    event.get("error_type"),
+                                    event.get("error", "worker error"),
+                                )
+                            )
+                            _kafka.job_duration.labels(status="error").observe(duration)
                             logger.warning(
-                                f"Job {job_id}: failed with error: {event.get('error')}")
+                                "Job %s: failed with error: %s",
+                                job_id,
+                                event.get("error"),
+                            )
 
             try:
                 await consumer.commit()
@@ -381,15 +390,15 @@ async def progress_consumer_loop(cfg: KafkaConfig) -> None:
     await consumer.start()
     logger.info(
         "Kafka progress consumer started (group: %s, topic: %s)",
-        group_id, cfg.progress_topic,
+        group_id,
+        cfg.progress_topic,
     )
     try:
         async for msg in consumer:
             try:
                 event = json.loads(msg.value)
             except Exception:
-                logger.warning(
-                    "Progress consumer: failed to parse message, skipping")
+                logger.warning("Progress consumer: failed to parse message, skipping")
                 continue
 
             job_id = event.get("job_id")

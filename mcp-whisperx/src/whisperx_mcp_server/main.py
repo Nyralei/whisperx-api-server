@@ -182,7 +182,7 @@ def whisperx_transcribe_audio(
     if hotwords is not None:
         form_fields["hotwords"] = hotwords
 
-    for value in (timestamp_granularities or ["segment"]):
+    for value in timestamp_granularities or ["segment"]:
         form_fields.setdefault("timestamp_granularities[]", [])
         form_fields["timestamp_granularities[]"].append(value)
 
@@ -191,7 +191,9 @@ def whisperx_transcribe_audio(
 
     url = f"{_api_base_url()}/v1/audio/transcriptions"
     with httpx.Client(timeout=_api_timeout()) as client:
-        response = client.post(url, headers=_auth_headers(), files=files, data=form_fields)
+        response = client.post(
+            url, headers=_auth_headers(), files=files, data=form_fields
+        )
     _ensure_success(response)
     return _decode_response(response)
 
@@ -221,7 +223,9 @@ def whisperx_translate_audio(
 
     url = f"{_api_base_url()}/v1/audio/translations"
     with httpx.Client(timeout=_api_timeout()) as client:
-        response = client.post(url, headers=_auth_headers(), files=files, data=form_fields)
+        response = client.post(
+            url, headers=_auth_headers(), files=files, data=form_fields
+        )
     _ensure_success(response)
     return _decode_response(response)
 

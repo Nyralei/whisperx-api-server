@@ -122,6 +122,7 @@ class Language(str, Enum):
     YUE = "yue"
     ZH = "zh"
 
+
 # https://github.com/OpenNMT/CTranslate2/blob/master/docs/quantization.md
 
 
@@ -156,6 +157,7 @@ class WhisperConfig(BaseModel):
     Models created by authors of `faster-whisper` can be found at https://huggingface.co/Systran
     You can find other supported models at https://huggingface.co/models?p=2&sort=trending&search=ctranslate2 and https://huggingface.co/models?sort=trending&search=ct2
     """
+
     model: str = Field(default="large-v3")
     inference_device: Device = Field(default=Device.AUTO)
     device_index: int | list[int] = Field(default=0)

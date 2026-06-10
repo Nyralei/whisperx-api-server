@@ -40,7 +40,9 @@ def _app_version() -> str:
     tags=["Observability"],
 )
 def health_check():
-    return JSONResponse(content={"status": "healthy"}, media_type=MediaType.APPLICATION_JSON)
+    return JSONResponse(
+        content={"status": "healthy"}, media_type=MediaType.APPLICATION_JSON
+    )
 
 
 @info_router.get(
@@ -52,7 +54,9 @@ def health_check():
     ),
     tags=["Observability"],
 )
-async def info(request: Request, detail: Literal["summary", "full"] = Query(default="summary")):
+async def info(
+    request: Request, detail: Literal["summary", "full"] = Query(default="summary")
+):
     config = get_config()
     payload: dict = {
         "version": _app_version(),
@@ -62,6 +66,7 @@ async def info(request: Request, detail: Literal["summary", "full"] = Query(defa
 
     if config.mode == DistributedMode.KAFKA:
         from whisperx_api_server import kafka_client
+
         discovery = await kafka_client.describe_workers()
         pending = kafka_client.pending_count()
         max_pending = config.kafka.max_pending_jobs
@@ -72,7 +77,9 @@ async def info(request: Request, detail: Literal["summary", "full"] = Query(defa
             "worker_group_id": config.kafka.consumer_group_worker,
             "pending_jobs": pending,
             "max_pending_jobs": max_pending,
-            "pending_saturation": round(pending / max_pending, 3) if max_pending else None,
+            "pending_saturation": round(pending / max_pending, 3)
+            if max_pending
+            else None,
             "healthy_worker_count": len(discovery["workers"]),
             "kafka_admin_ok": admin_ok,
         }
@@ -83,7 +90,9 @@ async def info(request: Request, detail: Literal["summary", "full"] = Query(defa
         if detail == "full":
             kafka_block["bootstrap_servers"] = config.kafka.bootstrap_servers
             if not admin_ok:
-                kafka_block["error"] = f"{discovery['error_type']}: {discovery['error_message']}"
+                kafka_block["error"] = (
+                    f"{discovery['error_type']}: {discovery['error_message']}"
+                )
             kafka_block["workers"] = [
                 {
                     "member_id": w["member_id"],
@@ -114,7 +123,9 @@ async def info(request: Request, detail: Literal["summary", "full"] = Query(defa
                 "in_use": in_use,
                 "available": available,
                 "max": max_concurrent,
-                "saturation": round(in_use / max_concurrent, 3) if max_concurrent else None,
+                "saturation": round(in_use / max_concurrent, 3)
+                if max_concurrent
+                else None,
             }
 
         # Loaded model names per stage (empty lists before first transcription).

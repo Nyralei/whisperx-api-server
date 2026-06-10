@@ -7,7 +7,8 @@ def setup_logger(log_level: str) -> None:
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     if log_level.upper() not in valid_levels:
         raise ValueError(
-            f"Invalid log level: {log_level!r}. Must be one of {valid_levels}")
+            f"Invalid log level: {log_level!r}. Must be one of {valid_levels}"
+        )
 
     logging_config = {
         "version": 1,  # required
@@ -16,7 +17,7 @@ def setup_logger(log_level: str) -> None:
             "default": {
                 "()": "uvicorn.logging.DefaultFormatter",
                 "fmt": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                "use_colors": True
+                "use_colors": True,
             },
         },
         "handlers": {
@@ -63,8 +64,8 @@ def setup_logger(log_level: str) -> None:
 
     # Suppress noisy but expected warnings from third-party libraries.
     # pyannote disables TF32 for reproducibility on every inference call — expected behaviour.
-    warnings.filterwarnings(
-        "ignore", message="TensorFloat-32", module="pyannote.*")
+    warnings.filterwarnings("ignore", message="TensorFloat-32", module="pyannote.*")
     # pyannote pooling layer emits this for very short segments with only one frame.
     warnings.filterwarnings(
-        "ignore", message="std\\(\\): degrees of freedom", module="pyannote.*")
+        "ignore", message="std\\(\\): degrees of freedom", module="pyannote.*"
+    )

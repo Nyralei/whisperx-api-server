@@ -1,14 +1,11 @@
 import asyncio
-from functools import lru_cache
-from typing import Annotated
 import json
 import logging
 import os
-from fastapi import (
-    Depends,
-    HTTPException,
-    status
-)
+from functools import lru_cache
+from typing import Annotated
+
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from whisperx_api_server.config import Config
@@ -47,7 +44,7 @@ async def _load_api_keys(api_keys_file: str) -> dict[str, str]:
         ):
             return _api_keys_cache
 
-        with open(api_keys_file, "r", encoding="utf-8") as f:
+        with open(api_keys_file, encoding="utf-8") as f:
             loaded_api_keys = json.load(f)
         if not isinstance(loaded_api_keys, dict):
             raise ValueError("API keys file must contain a JSON object")
@@ -59,7 +56,8 @@ async def _load_api_keys(api_keys_file: str) -> dict[str, str]:
 
 
 async def verify_api_key(
-    config: ConfigDependency, credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)]
+    config: ConfigDependency,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
 ) -> None:
     api_keys = {}
 
@@ -76,11 +74,13 @@ async def verify_api_key(
 
     if credentials.credentials != config.api_key and client_name is None:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key"
+        )
 
     if client_name:
-        logger.info(f"Authorized request from client: '{client_name}'")
+        logger.info("Authorized request from client: '%s'", client_name)
     else:
         logger.info("Authorized request using the default API key")
+
 
 ApiKeyDependency = Depends(verify_api_key)

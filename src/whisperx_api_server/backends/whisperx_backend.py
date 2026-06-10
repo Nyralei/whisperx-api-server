@@ -12,15 +12,21 @@ from whisperx import diarize as whisperx_diarize
 
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
-from whisperx_api_server.executors import get_model_executor, get_io_executor
+from whisperx_api_server.executors import get_io_executor, get_model_executor
+
+from .registry import (
+    register_alignment_backend,
+    register_diarization_backend,
+    register_transcription_backend,
+)
 from .whisperx_runtime import (
-    align_model_instances,
-    alignment_cache_mod_lock,
-    alignment_locks,
     acquire_align_model,
     acquire_diarize_pipeline,
     acquire_transcribe_pipeline,
     align_cache_key_for,
+    align_model_instances,
+    alignment_cache_mod_lock,
+    alignment_locks,
     determine_inference_device,
     diarize_locks,
     diarize_pipeline_instances,
@@ -33,12 +39,6 @@ from .whisperx_runtime import (
     transcribe_pipeline_instances,
     transcribe_pipeline_locks,
     unload_model_object_async,
-)
-
-from .registry import (
-    register_alignment_backend,
-    register_diarization_backend,
-    register_transcription_backend,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,8 +106,7 @@ class WhisperXTranscriptionBackend:
         # post-pop callers serialize behind us, and once we release the lock
         # they would still see a torn-down model. Acceptable: the request
         # would either succeed on CPU or surface a backend error mapped to 5xx.
-        to_remove = [
-            k for k in transcribe_pipeline_instances if k[0] == model_name]
+        to_remove = [k for k in transcribe_pipeline_instances if k[0] == model_name]
         if not to_remove:
             return False
         for cache_key in to_remove:
@@ -136,13 +135,17 @@ class WhisperXTranscriptionBackend:
     ) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         lang = getattr(language, "value", language) if language else None
-        num_workers = 0 if determine_inference_device(
-        ) == "cuda" else config.whisper.num_workers
+        num_workers = (
+            0 if determine_inference_device() == "cuda" else config.whisper.num_workers
+        )
 
         model_load_start = time.perf_counter()
         model = await load_transcribe_pipeline(model_name=model_name)
         logger.info(
-            f"Request ID: {request_id} - Loaded transcription pipeline backend=whisperx model={model_name} in {time.perf_counter() - model_load_start:.2f} seconds"
+            "Request ID: %s - Loaded transcription pipeline backend=whisperx model=%s in %.2f seconds",
+            request_id,
+            model_name,
+            time.perf_counter() - model_load_start,
         )
 
         lock = getattr(model, "_transcribe_lock", None)
@@ -166,16 +169,22 @@ class WhisperXTranscriptionBackend:
             if lock is not None:
                 async with lock:
                     _apply_request_options(model, asr_options)
-                    result = await loop.run_in_executor(get_model_executor(), _run_transcription)
+                    result = await loop.run_in_executor(
+                        get_model_executor(), _run_transcription
+                    )
             else:
                 _apply_request_options(model, asr_options)
-                result = await loop.run_in_executor(get_model_executor(), _run_transcription)
+                result = await loop.run_in_executor(
+                    get_model_executor(), _run_transcription
+                )
         finally:
             if cache_key is not None:
                 release_transcribe_pipeline(cache_key)
 
         logger.info(
-            f"Request ID: {request_id} - Transcription completed using backend=whisperx")
+            "Request ID: %s - Transcription completed using backend=whisperx",
+            request_id,
+        )
         return result
 
 
@@ -185,12 +194,14 @@ class WhisperXAlignmentBackend:
             return
         if config.alignment.preload_model_name:
             logger.info(
-                f"Preloading alignment model for: {config.alignment.preload_model_name}")
+                "Preloading alignment model for: %s",
+                config.alignment.preload_model_name,
+            )
             await load_align_model(config.alignment.preload_model_name)
             return
 
         for lang in config.alignment.whitelist:
-            logger.info(f"Preloading alignment model for: {lang}")
+            logger.info("Preloading alignment model for: %s", lang)
             await load_align_model(lang)
 
     def list_loaded_models(self) -> list[str]:
@@ -238,11 +249,15 @@ class WhisperXAlignmentBackend:
         try:
             alignment_model_start = time.perf_counter()
             logger.info(
-                f"Request ID: {request_id} - Loading alignment model backend=whisperx language={language_code}"
+                "Request ID: %s - Loading alignment model backend=whisperx language=%s",
+                request_id,
+                language_code,
             )
             model_a, metadata = await load_align_model(language_code=language_code)
             logger.info(
-                f"Request ID: {request_id} - Alignment model loaded in {time.perf_counter() - alignment_model_start:.2f} seconds"
+                "Request ID: %s - Alignment model loaded in %.2f seconds",
+                request_id,
+                time.perf_counter() - alignment_model_start,
             )
 
             def _run_alignment() -> Any:
@@ -258,12 +273,16 @@ class WhisperXAlignmentBackend:
 
             alignment_start = time.perf_counter()
             async with alignment_locks[cache_key]:
-                result["segments"] = await loop.run_in_executor(get_model_executor(), _run_alignment)
+                result["segments"] = await loop.run_in_executor(
+                    get_model_executor(), _run_alignment
+                )
         finally:
             release_align_model(language_code)
 
         logger.info(
-            f"Request ID: {request_id} - Alignment completed using backend=whisperx in {time.perf_counter() - alignment_start:.2f} seconds"
+            "Request ID: %s - Alignment completed using backend=whisperx in %.2f seconds",
+            request_id,
+            time.perf_counter() - alignment_start,
         )
         return result
 
@@ -311,11 +330,15 @@ class WhisperXDiarizationBackend:
         loop = asyncio.get_running_loop()
         diarization_model_start = time.perf_counter()
         logger.info(
-            f"Request ID: {request_id} - Loading diarization model backend=whisperx model={config.diarization.model}"
+            "Request ID: %s - Loading diarization model backend=whisperx model=%s",
+            request_id,
+            config.diarization.model,
         )
         diarize_model = await load_diarize_pipeline(model_name=config.diarization.model)
         logger.info(
-            f"Request ID: {request_id} - Diarization model loaded in {time.perf_counter() - diarization_model_start:.2f} seconds"
+            "Request ID: %s - Diarization model loaded in %.2f seconds",
+            request_id,
+            time.perf_counter() - diarization_model_start,
         )
 
         def _run_diarization() -> tuple[Any, Any]:
@@ -329,7 +352,9 @@ class WhisperXDiarizationBackend:
         diarize_start = time.perf_counter()
         try:
             async with diarize_locks[config.diarization.model]:
-                diarize_segments, embeddings = await loop.run_in_executor(get_model_executor(), _run_diarization)
+                diarize_segments, embeddings = await loop.run_in_executor(
+                    get_model_executor(), _run_diarization
+                )
         finally:
             release_diarize_pipeline(config.diarization.model)
 
@@ -351,7 +376,9 @@ class WhisperXDiarizationBackend:
             ),
         )
         logger.info(
-            f"Request ID: {request_id} - Diarization completed using backend=whisperx in {time.perf_counter() - diarize_start:.2f} seconds"
+            "Request ID: %s - Diarization completed using backend=whisperx in %.2f seconds",
+            request_id,
+            time.perf_counter() - diarize_start,
         )
         return result
 

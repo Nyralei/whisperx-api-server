@@ -1,5 +1,6 @@
-from whisperx.utils import WriteSRT, WriteVTT, WriteAudacity
 from fastapi.responses import JSONResponse, Response
+from whisperx.utils import WriteAudacity, WriteSRT, WriteVTT
+
 from whisperx_api_server.config import MediaType
 
 
@@ -13,7 +14,7 @@ class ListWriter:
         self.lines.append(text)
 
     def get_output(self):
-        return ''.join(self.lines)
+        return "".join(self.lines)
 
     def flush(self):
         pass
@@ -28,8 +29,7 @@ def update_options(kwargs, defaults):
     :return: Updated options dictionary.
     """
     options = defaults.copy()
-    options.update({key: kwargs.get(key, value)
-                   for key, value in defaults.items()})
+    options.update({key: kwargs.get(key, value) for key, value in defaults.items()})
     return options
 
 
@@ -55,7 +55,8 @@ def handle_whisperx_format(transcript, writer_class, options):
         writer_input.setdefault("language", transcript.get("language"))
     else:
         raise ValueError(
-            "Invalid transcript payload: 'segments' must be a list or dict.")
+            "Invalid transcript payload: 'segments' must be a list or dict."
+        )
 
     writer.write_result(writer_input, output, options)
 
@@ -81,15 +82,18 @@ def format_transcription(transcript, format, **kwargs) -> Response:
 
     if format == "json":
         response_data = {"text": transcript.get("text", "")}
-        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+        return JSONResponse(
+            content=response_data, media_type=MediaType.APPLICATION_JSON
+        )
     elif format == "verbose_json":
         return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
     elif format == "vtt_json":
-        transcript["vtt_text"] = handle_whisperx_format(
-            transcript, WriteVTT, options)
+        transcript["vtt_text"] = handle_whisperx_format(transcript, WriteVTT, options)
         return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
     elif format == "text":
-        return Response(content=transcript.get("text", ""), media_type=MediaType.TEXT_PLAIN)
+        return Response(
+            content=transcript.get("text", ""), media_type=MediaType.TEXT_PLAIN
+        )
     elif format == "srt":
         content = handle_whisperx_format(transcript, WriteSRT, options)
         return Response(content=content, media_type=MediaType.TEXT_PLAIN)

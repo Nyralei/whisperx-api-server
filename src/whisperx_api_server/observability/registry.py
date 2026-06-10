@@ -31,7 +31,8 @@ def _setup_http_instruments(registry: "CollectorRegistry") -> None:
     direct attribute assignment on the imported module object, mirroring
     the kafka_client._client / s3_client._client pattern.
     """
-    from prometheus_client import Counter, Histogram, Gauge
+    from prometheus_client import Counter, Gauge, Histogram
+
     from whisperx_api_server.observability import http as _http
     from whisperx_api_server.observability.taxonomy import HTTP_BUCKETS
 
@@ -66,6 +67,7 @@ def _setup_http_instruments(registry: "CollectorRegistry") -> None:
 def _setup_pipeline_instruments(registry: "CollectorRegistry") -> None:
     """Construct real pipeline Histograms and replace pipeline.py shims in-place."""
     from prometheus_client import Histogram
+
     from whisperx_api_server.observability import pipeline as _pipe
     from whisperx_api_server.observability.taxonomy import (
         PIPELINE_BUCKETS,
@@ -105,6 +107,7 @@ def _setup_gpu_instruments(registry: "CollectorRegistry") -> None:
     # CUDA guard
     try:
         import torch
+
         cuda_available = bool(torch.cuda.is_available())
     except Exception:
         cuda_available = False
@@ -115,6 +118,7 @@ def _setup_gpu_instruments(registry: "CollectorRegistry") -> None:
     # pynvml init guard
     try:
         import pynvml
+
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
     except Exception:
@@ -122,11 +126,13 @@ def _setup_gpu_instruments(registry: "CollectorRegistry") -> None:
             "pynvml unavailable or NVIDIA driver not found — GPU metrics disabled"
         )
         from whisperx_api_server.observability import gpu as _gpu
+
         _gpu._pynvml_ok = False
         _gpu._nvml_handle = None
         return
 
     from prometheus_client import Gauge
+
     from whisperx_api_server.observability import gpu as _gpu
 
     _gpu.vram_used_bytes = Gauge(
@@ -164,13 +170,13 @@ def _setup_gpu_instruments(registry: "CollectorRegistry") -> None:
         registry=registry,
     )
 
-    from whisperx_api_server.observability.taxonomy import ModelStage
     from whisperx_api_server.backends.registry import (
-        get_transcription_backend,
         get_alignment_backend,
         get_diarization_backend,
+        get_transcription_backend,
         resolve_stage_backends,
     )
+    from whisperx_api_server.observability.taxonomy import ModelStage
 
     def _make_loaded_cb(get_fn, backend_name: str):
         def _cb() -> float:
@@ -178,6 +184,7 @@ def _setup_gpu_instruments(registry: "CollectorRegistry") -> None:
                 return float(len(get_fn(backend_name).list_loaded_models()))
             except Exception:
                 return 0.0
+
         return _cb
 
     selected = resolve_stage_backends()
@@ -200,7 +207,8 @@ def _setup_kafka_instruments(registry: "CollectorRegistry") -> None:
     Called ONLY from setup_metrics() after _registry is created, and ONLY
     when config.mode == DistributedMode.KAFKA.
     """
-    from prometheus_client import Counter, Histogram, Gauge
+    from prometheus_client import Counter, Gauge, Histogram
+
     from whisperx_api_server.observability import kafka as _kafka
     from whisperx_api_server.observability.taxonomy import PIPELINE_BUCKETS
 
@@ -228,9 +236,8 @@ def _setup_kafka_instruments(registry: "CollectorRegistry") -> None:
     )
 
     import whisperx_api_server.kafka_client as kafka_client
-    _kafka.pending_jobs.set_function(
-        lambda: float(len(kafka_client._pending_jobs))
-    )
+
+    _kafka.pending_jobs.set_function(lambda: float(len(kafka_client._pending_jobs)))
 
     logger.info("Kafka instruments registered in CollectorRegistry")
 
@@ -251,9 +258,7 @@ def setup_metrics(config: Any) -> None:
     if not getattr(config, "enabled", False):
         return
     if _registry is not None:
-        logger.debug(
-            "setup_metrics() called twice; reusing existing CollectorRegistry"
-        )
+        logger.debug("setup_metrics() called twice; reusing existing CollectorRegistry")
         return
 
     from prometheus_client import CollectorRegistry
@@ -264,8 +269,7 @@ def setup_metrics(config: Any) -> None:
     _setup_gpu_instruments(_registry)
     from whisperx_api_server.config import DistributedMode
     from whisperx_api_server.dependencies import get_config
+
     if get_config().mode == DistributedMode.KAFKA:
         _setup_kafka_instruments(_registry)
-    logger.info(
-        "Prometheus metrics enabled: per-app CollectorRegistry initialized"
-    )
+    logger.info("Prometheus metrics enabled: per-app CollectorRegistry initialized")

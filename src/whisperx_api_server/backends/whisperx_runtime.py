@@ -5,7 +5,7 @@ import logging
 import os
 from asyncio import Lock
 from collections import defaultdict
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import torch
 from whisperx import alignment as whisperx_alignment
@@ -43,16 +43,14 @@ def _hashable_options(opts: Any) -> Any:
 
 
 # caches
-transcribe_pipeline_instances: Dict[Tuple[Any, ...],
-                                    FasterWhisperPipeline] = {}
+transcribe_pipeline_instances: dict[tuple[Any, ...], FasterWhisperPipeline] = {}
 transcribe_pipeline_locks = defaultdict(Lock)
-transcribe_in_use: defaultdict[Tuple[Any, ...], int] = defaultdict(int)
+transcribe_in_use: defaultdict[tuple[Any, ...], int] = defaultdict(int)
 align_model_instances: dict[str, dict[str, Any]] = {}
 alignment_locks = defaultdict(Lock)
 alignment_cache_mod_lock = Lock()
 align_in_use: defaultdict[str, int] = defaultdict(int)
-diarize_pipeline_instances: dict[str,
-                                 whisperx_diarize.DiarizationPipeline] = {}
+diarize_pipeline_instances: dict[str, whisperx_diarize.DiarizationPipeline] = {}
 diarize_locks = defaultdict(Lock)
 diarize_in_use: defaultdict[str, int] = defaultdict(int)
 
@@ -75,11 +73,11 @@ def release_align_model(language_code: str) -> None:
         align_in_use[key] -= 1
 
 
-def acquire_transcribe_pipeline(cache_key: Tuple[Any, ...]) -> None:
+def acquire_transcribe_pipeline(cache_key: tuple[Any, ...]) -> None:
     transcribe_in_use[cache_key] += 1
 
 
-def release_transcribe_pipeline(cache_key: Tuple[Any, ...]) -> None:
+def release_transcribe_pipeline(cache_key: tuple[Any, ...]) -> None:
     if transcribe_in_use[cache_key] > 0:
         transcribe_in_use[cache_key] -= 1
     if transcribe_in_use[cache_key] == 0:
@@ -158,7 +156,7 @@ async def _get_or_init_model(
             logger.info(log_init.format(key=key))
             instance = await init_func()
         except Exception as e:
-            logger.error(f"Failed to initialize model {key}: {e}")
+            logger.error("Failed to initialize model %s: %s", key, e)
             raise
         cache_dict[key] = instance
         return instance
@@ -168,8 +166,7 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
     config = get_config()
     inference_device = determine_inference_device()
     compute_type = config.whisper.compute_type.value
-    vad_method = getattr(config.whisper.vad_method,
-                         "value", config.whisper.vad_method)
+    vad_method = getattr(config.whisper.vad_method, "value", config.whisper.vad_method)
     cache_key = (
         model_name,
         inference_device,
@@ -199,15 +196,13 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
             vad_options=config.whisper.vad_options,
             download_root=config.whisper.download_root,
             local_files_only=config.whisper.local_files_only,
-            threads=_resolve_ct2_threads(
-                config.whisper.cpu_threads, inference_device),
+            threads=_resolve_ct2_threads(config.whisper.cpu_threads, inference_device),
             use_auth_token=config.hf_token,
         )
 
     loop = asyncio.get_running_loop()
     if not config.whisper.cache:
-        logger.info(
-            f"Initializing transcribe pipeline without cache: {cache_key}")
+        logger.info("Initializing transcribe pipeline without cache: %s", cache_key)
         pipeline = await loop.run_in_executor(get_io_executor(), _create_pipeline)
         pipeline._transcribe_lock = asyncio.Lock()
         pipeline._cache_key = None  # uncached: unload-time refcount doesn't apply
@@ -217,8 +212,7 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
         key=cache_key,
         cache_dict=transcribe_pipeline_instances,
         lock_dict=transcribe_pipeline_locks,
-        init_func=lambda: loop.run_in_executor(
-            get_io_executor(), _create_pipeline),
+        init_func=lambda: loop.run_in_executor(get_io_executor(), _create_pipeline),
         log_reuse="Reusing cached transcribe pipeline: {key}",
         log_init="Initializing transcribe pipeline: {key}",
     )
@@ -227,19 +221,19 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
     return pipeline
 
 
-async def _cleanup_alignment_cache_whitelist(keep_key: Optional[str] = None) -> None:
+async def _cleanup_alignment_cache_whitelist(keep_key: str | None = None) -> None:
     config = get_config()
     whitelist = config.alignment.whitelist
     if not whitelist:
         return
     async with alignment_cache_mod_lock:
         keys_to_remove = [
-            k for k in align_model_instances
+            k
+            for k in align_model_instances
             if k not in whitelist and k != keep_key and align_in_use[k] == 0
         ]
         for key in keys_to_remove:
-            logger.info(
-                f"Unloading alignment model for {key} (not in whitelist).")
+            logger.info("Unloading alignment model for %s (not in whitelist).", key)
             align_model_data = align_model_instances.pop(key, None)
             # Drop the per-key lock so the defaultdict doesn't grow unbounded
             # over the process lifetime as languages come and go.
@@ -252,20 +246,23 @@ async def _cleanup_alignment_cache_whitelist(keep_key: Optional[str] = None) -> 
 
 async def load_align_model(
     language_code: str,
-    model_name: Optional[str] = None,
-    model_dir: Optional[str] = None,
-) -> Tuple[Any, Dict[str, Any]]:
+    model_name: str | None = None,
+    model_dir: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
     config = get_config()
     inference_device = determine_inference_device()
     selected_model_name = model_name
     if "multilingual" in config.alignment.models:
         selected_model_name = config.alignment.models["multilingual"]
         logger.info(
-            f"Overriding with 'multilingual' alignment model: {selected_model_name}")
+            "Overriding with 'multilingual' alignment model: %s", selected_model_name
+        )
     elif language_code in config.alignment.models:
         selected_model_name = config.alignment.models[language_code]
         logger.info(
-            f"Using configured alignment model for '{language_code}': {selected_model_name}"
+            "Using configured alignment model for '%s': %s",
+            language_code,
+            selected_model_name,
         )
 
     if (
@@ -278,12 +275,12 @@ async def load_align_model(
 
     await _cleanup_alignment_cache_whitelist(keep_key=cache_key)
 
-    logger.debug(f"config.alignment.models = {config.alignment.models}")
+    logger.debug("config.alignment.models = %s", config.alignment.models)
     logger.debug(
-        f"Incoming language_code = {language_code}, model_name param = {model_name}"
+        "Incoming language_code = %s, model_name param = %s", language_code, model_name
     )
 
-    async def _init_alignment() -> Tuple[Any, Dict[str, Any]]:
+    async def _init_alignment() -> tuple[Any, dict[str, Any]]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             get_io_executor(),
@@ -297,7 +294,7 @@ async def load_align_model(
         )
 
     if not config.alignment.cache:
-        logger.info(f"Initializing alignment model without cache: {cache_key}")
+        logger.info("Initializing alignment model without cache: %s", cache_key)
         return await _init_alignment()
 
     async def _init_wrapper() -> dict[str, Any]:
@@ -315,12 +312,14 @@ async def load_align_model(
     return model_data["model"], model_data["metadata"]
 
 
-async def load_diarize_pipeline(model_name: str) -> whisperx_diarize.DiarizationPipeline:
+async def load_diarize_pipeline(
+    model_name: str,
+) -> whisperx_diarize.DiarizationPipeline:
     config = get_config()
     inference_device = determine_inference_device()
 
     def _init_diarization():
-        logger.info(f"Loading diarization pipeline: {model_name}")
+        logger.info("Loading diarization pipeline: %s", model_name)
         return whisperx_diarize.DiarizationPipeline(
             model_name=model_name,
             token=config.hf_token,
@@ -329,16 +328,14 @@ async def load_diarize_pipeline(model_name: str) -> whisperx_diarize.Diarization
 
     loop = asyncio.get_running_loop()
     if not config.diarization.cache:
-        logger.info(
-            f"Initializing diarization model without cache: {model_name}")
+        logger.info("Initializing diarization model without cache: %s", model_name)
         return await loop.run_in_executor(get_io_executor(), _init_diarization)
 
     diarize_model = await _get_or_init_model(
         key=model_name,
         cache_dict=diarize_pipeline_instances,
         lock_dict=diarize_locks,
-        init_func=lambda: loop.run_in_executor(
-            get_io_executor(), _init_diarization),
+        init_func=lambda: loop.run_in_executor(get_io_executor(), _init_diarization),
         log_reuse="Reusing cached diarization model for: {key}",
         log_init="Initializing diarization model: {key}",
     )

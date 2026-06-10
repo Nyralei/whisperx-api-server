@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 
+import whisperx_api_server.s3_client as s3_client
 from whisperx_api_server.backends.registry import (
     get_alignment_backend,
     get_diarization_backend,
@@ -12,7 +13,6 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
-import whisperx_api_server.s3_client as s3_client
 from whisperx_worker.health_server import WorkerReadiness, start_health_server
 from whisperx_worker.processor import process_job, serialize_result
 from whisperx_worker.progress import publish_stage
@@ -32,16 +32,21 @@ async def run_worker() -> None:
     readiness = WorkerReadiness()
     health_runner = await start_health_server(readiness, config.worker_health_port)
 
-    gpu_task: "asyncio.Task | None" = None
+    gpu_task: asyncio.Task | None = None
     if config.metrics.enabled:
-        from whisperx_api_server.observability.registry import setup_metrics, get_registry
-        from whisperx_api_server.observability import gpu as _gpu
         from prometheus_client import start_http_server
+
+        from whisperx_api_server.observability import gpu as _gpu
+        from whisperx_api_server.observability.registry import (
+            get_registry,
+            setup_metrics,
+        )
 
         # creates _registry, runs _setup_gpu_instruments
         setup_metrics(config.metrics)
 
         if _gpu._pynvml_ok:
+
             def _on_gpu_task_done(task: asyncio.Task) -> None:
                 if not task.cancelled() and task.exception() is not None:
                     logger.error(
@@ -51,7 +56,8 @@ async def run_worker() -> None:
 
             gpu_task = asyncio.create_task(
                 _gpu._gpu_poll_loop(
-                    config.metrics.gpu_poll_interval, _gpu._nvml_handle),
+                    config.metrics.gpu_poll_interval, _gpu._nvml_handle
+                ),
                 name="worker-gpu-metrics-poller",
             )
             gpu_task.add_done_callback(_on_gpu_task_done)
@@ -67,6 +73,7 @@ async def run_worker() -> None:
         )
 
     from whisperx_api_server.transcriber import init_concurrency
+
     init_concurrency()
 
     shutdown_event = asyncio.Event()
@@ -83,8 +90,7 @@ async def run_worker() -> None:
     sigterm_registered = False
     try:
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(
-            signal.SIGTERM, _request_worker_shutdown, "SIGTERM")
+        loop.add_signal_handler(signal.SIGTERM, _request_worker_shutdown, "SIGTERM")
         sigterm_registered = True
     except NotImplementedError:
         logger.info(
@@ -96,24 +102,29 @@ async def run_worker() -> None:
 
     selected_backends = resolve_stage_backends()
     logger.info(
-        f"Preloading backends: transcription={selected_backends.transcription}, "
-        f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
+        "Preloading backends: transcription=%s, alignment=%s, diarization=%s",
+        selected_backends.transcription,
+        selected_backends.alignment,
+        selected_backends.diarization,
     )
     try:
-        await get_transcription_backend(selected_backends.transcription).preload_default()
+        await get_transcription_backend(
+            selected_backends.transcription
+        ).preload_default()
     except Exception:
         logger.exception(
-            "Failed to preload transcription backend; will load on first job")
+            "Failed to preload transcription backend; will load on first job"
+        )
     try:
         await get_alignment_backend(selected_backends.alignment).preload_default()
     except Exception:
-        logger.exception(
-            "Failed to preload alignment backend; will load on first job")
+        logger.exception("Failed to preload alignment backend; will load on first job")
     try:
         await get_diarization_backend(selected_backends.diarization).preload_default()
     except Exception:
         logger.exception(
-            "Failed to preload diarization backend; will load on first job")
+            "Failed to preload diarization backend; will load on first job"
+        )
     # Preload may fail (worker will lazy-load on first job); don't gate readiness on that.
     readiness.models_loaded.set()
 
@@ -162,9 +173,10 @@ async def run_worker() -> None:
     )
     readiness.kafka_subscribed.set()
     logger.info(
-        f"Worker ready — topic: {config.kafka.request_topic}, "
-        f"group: {config.kafka.consumer_group_worker}, "
-        f"brokers: {config.kafka.bootstrap_servers}"
+        "Worker ready — topic: %s, group: %s, brokers: %s",
+        config.kafka.request_topic,
+        config.kafka.consumer_group_worker,
+        config.kafka.bootstrap_servers,
     )
 
     try:
@@ -184,13 +196,15 @@ async def run_worker() -> None:
                     logger.error(
                         "Failed to parse Kafka message (offset=%s, partition=%s), skipping. "
                         "Raw value preview: %r",
-                        msg.offset, msg.partition, preview,
+                        msg.offset,
+                        msg.partition,
+                        preview,
                     )
                     await consumer.commit()
                     continue
 
                 job_id = event.get("job_id", "<unknown>")
-                logger.info(f"Job {job_id}: received")
+                logger.info("Job %s: received", job_id)
 
                 # Pause consumer — process one job at a time. `job_in_flight` is set
                 # before pause so the rebalance listener re-applies it if assignments
@@ -211,7 +225,7 @@ async def run_worker() -> None:
                         reply["status"] = "ok"
                         reply["result"] = result
                     except Exception as exc:
-                        logger.exception(f"Job {job_id}: failed")
+                        logger.exception("Job %s: failed", job_id)
                         reply["status"] = "error"
                         reply["error"] = str(exc)
                         # Pass exception type so the API can rehydrate typed
@@ -230,13 +244,19 @@ async def run_worker() -> None:
                     # never affect the reply publish below).
                     if reply["status"] == "ok":
                         await publish_stage(
-                            producer, config.kafka.progress_topic,
-                            job_id, "completed", status="completed",
+                            producer,
+                            config.kafka.progress_topic,
+                            job_id,
+                            "completed",
+                            status="completed",
                         )
                     else:
                         await publish_stage(
-                            producer, config.kafka.progress_topic,
-                            job_id, "failed", status="failed",
+                            producer,
+                            config.kafka.progress_topic,
+                            job_id,
+                            "failed",
+                            status="failed",
                             error=reply.get("error"),
                             error_type=reply.get("error_type"),
                         )
@@ -248,7 +268,10 @@ async def run_worker() -> None:
                         value=serialize_result(reply).encode(),
                     )
                     logger.info(
-                        f"Job {job_id}: reply published to {config.kafka.reply_topic}")
+                        "Job %s: reply published to %s",
+                        job_id,
+                        config.kafka.reply_topic,
+                    )
 
                     s3_key = event.get("s3_key")
                     if config.s3.delete_after_download and s3_key:
@@ -256,13 +279,14 @@ async def run_worker() -> None:
                             await s3_client.delete_audio(s3_key)
                         except Exception:
                             logger.warning(
-                                f"Job {job_id}: failed to delete S3 object {s3_key!r}")
+                                "Job %s: failed to delete S3 object %r", job_id, s3_key
+                            )
 
                     await consumer.commit()
                 finally:
                     job_in_flight[0] = False
                     consumer.resume(*consumer.assignment())
-                    logger.info(f"Job {job_id}: done, consumer resumed")
+                    logger.info("Job %s: done, consumer resumed", job_id)
 
         logger.info("Worker shutdown requested, exiting message loop")
 

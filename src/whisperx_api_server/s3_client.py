@@ -20,6 +20,7 @@ async def init_client(cfg: S3Config) -> None:
 
     _config = cfg
     from botocore.config import Config as BotocoreConfig
+
     session = AioSession()
     ctx = session.create_client(
         "s3",
@@ -35,17 +36,21 @@ async def init_client(cfg: S3Config) -> None:
     )
     _client = await ctx.__aenter__()
     logger.info(
-        f"S3 client initialized (endpoint: {cfg.endpoint_url}, bucket: {cfg.bucket})")
+        "S3 client initialized (endpoint: %s, bucket: %s)", cfg.endpoint_url, cfg.bucket
+    )
 
     try:
         try:
             await _client.head_bucket(Bucket=cfg.bucket)
         except Exception as exc:
             from botocore.exceptions import ClientError
-            if not isinstance(exc, ClientError) or exc.response["Error"]["Code"] not in ("404", "NoSuchBucket"):
+
+            if not isinstance(exc, ClientError) or exc.response["Error"][
+                "Code"
+            ] not in ("404", "NoSuchBucket"):
                 raise
             await _client.create_bucket(Bucket=cfg.bucket)
-            logger.info(f"Created S3 bucket: {cfg.bucket}")
+            logger.info("Created S3 bucket: %s", cfg.bucket)
 
         if cfg.manage_lifecycle and cfg.object_expiry_days > 0:
             await _client.put_bucket_lifecycle_configuration(
@@ -62,7 +67,9 @@ async def init_client(cfg: S3Config) -> None:
                 },
             )
             logger.debug(
-                f"S3 bucket lifecycle set: expire after {cfg.object_expiry_days} day(s)")
+                "S3 bucket lifecycle set: expire after %s day(s)",
+                cfg.object_expiry_days,
+            )
     except Exception:
         await ctx.__aexit__(*sys.exc_info())
         _client = None
@@ -85,7 +92,7 @@ async def upload_audio(data: bytes, job_id: str, filename: str) -> str:
         raise RuntimeError("S3 client not initialized")
     key = f"audio/{job_id}/{filename}"
     await _client.put_object(Bucket=_config.bucket, Key=key, Body=data)
-    logger.debug(f"Uploaded {len(data)} bytes to s3://{_config.bucket}/{key}")
+    logger.debug("Uploaded %s bytes to s3://%s/%s", len(data), _config.bucket, key)
     return key
 
 
@@ -112,7 +119,7 @@ async def upload_audio_stream(upload_file, job_id: str, filename: str) -> str:
 
     data = await upload_file.read()
     await _client.put_object(Bucket=_config.bucket, Key=key, Body=data)
-    logger.debug(f"Uploaded {len(data)} bytes to s3://{_config.bucket}/{key}")
+    logger.debug("Uploaded %s bytes to s3://%s/%s", len(data), _config.bucket, key)
     return key
 
 
@@ -122,8 +129,7 @@ async def download_audio(key: str) -> bytes:
     response = await _client.get_object(Bucket=_config.bucket, Key=key)
     async with response["Body"] as stream:
         data = await stream.read()
-    logger.debug(
-        f"Downloaded {len(data)} bytes from s3://{_config.bucket}/{key}")
+    logger.debug("Downloaded %s bytes from s3://%s/%s", len(data), _config.bucket, key)
     return data
 
 
@@ -131,4 +137,4 @@ async def delete_audio(key: str) -> None:
     if _client is None or _config is None:
         raise RuntimeError("S3 client not initialized")
     await _client.delete_object(Bucket=_config.bucket, Key=key)
-    logger.debug(f"Deleted s3://{_config.bucket}/{key}")
+    logger.debug("Deleted s3://%s/%s", _config.bucket, key)

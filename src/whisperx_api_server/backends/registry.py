@@ -86,24 +86,25 @@ def register_transcription_backend(
     backend_name: str,
     backend: TranscriptionBackend,
 ) -> None:
-    _transcription_backends[_normalize_backend_name(
-        backend_name, "transcription")] = backend
+    _transcription_backends[_normalize_backend_name(backend_name, "transcription")] = (
+        backend
+    )
 
 
 def register_alignment_backend(
     backend_name: str,
     backend: AlignmentBackend,
 ) -> None:
-    _alignment_backends[_normalize_backend_name(
-        backend_name, "alignment")] = backend
+    _alignment_backends[_normalize_backend_name(backend_name, "alignment")] = backend
 
 
 def register_diarization_backend(
     backend_name: str,
     backend: DiarizationBackend,
 ) -> None:
-    _diarization_backends[_normalize_backend_name(
-        backend_name, "diarization")] = backend
+    _diarization_backends[_normalize_backend_name(backend_name, "diarization")] = (
+        backend
+    )
 
 
 def list_transcription_backends() -> list[str]:
@@ -127,8 +128,7 @@ def _build_unknown_backend_error(
     backend_name: str,
     available_backends: list[str],
 ) -> BackendSelectionError:
-    available_value = ", ".join(
-        available_backends) if available_backends else "none"
+    available_value = ", ".join(available_backends) if available_backends else "none"
     return BackendSelectionError(
         f"Unknown {stage} backend '{backend_name}'. Available backends: {available_value}."
     )

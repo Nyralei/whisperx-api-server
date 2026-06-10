@@ -42,7 +42,10 @@ async def publish_stage(
         event["error_type"] = error_type
     try:
         # send() (not send_and_wait) — we don't block the pipeline on broker ack.
-        await producer.send(topic, key=job_id.encode(), value=json.dumps(event).encode())
+        await producer.send(
+            topic, key=job_id.encode(), value=json.dumps(event).encode()
+        )
     except Exception:
-        logger.debug("progress publish failed for job %s stage %s",
-                     job_id, stage, exc_info=True)
+        logger.debug(
+            "progress publish failed for job %s stage %s", job_id, stage, exc_info=True
+        )

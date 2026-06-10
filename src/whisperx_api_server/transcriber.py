@@ -1,35 +1,35 @@
+import asyncio
 import contextlib
+import gc
+import logging
 import os
 import queue
 import re
+import tempfile
 import threading
+import time
 from typing import Any
 
 import numpy as np
-import gc
-import logging
-import time
-import tempfile
-import asyncio
 import torch
 from fastapi import UploadFile
 
-from whisperx_api_server.config import (
-    Language,
-)
-from whisperx_api_server.dependencies import get_config
-import whisperx_api_server.s3_client as s3_client
 import whisperx_api_server.kafka_client as kafka_client
+import whisperx_api_server.s3_client as s3_client
+from whisperx_api_server import request_status
 from whisperx_api_server.backends.registry import (
-    get_default_transcription_model_name,
     get_alignment_backend,
+    get_default_transcription_model_name,
     get_diarization_backend,
     get_transcription_backend,
     resolve_stage_backends,
 )
-from whisperx_api_server.observability import pipeline as _pipe
+from whisperx_api_server.config import (
+    Language,
+)
+from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.observability import kafka as _kafka
-from whisperx_api_server import request_status
+from whisperx_api_server.observability import pipeline as _pipe
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,17 @@ def _ffmpeg_decode_cmd(input_arg: str, sample_rate: int) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "0"]
     if input_arg != "pipe:0":
         cmd.append("-nostdin")
-    cmd += ["-i", input_arg, "-f", "f32le", "-ac",
-            "1", "-ar", str(sample_rate), "pipe:1"]
+    cmd += [
+        "-i",
+        input_arg,
+        "-f",
+        "f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "pipe:1",
+    ]
     return cmd
 
 
@@ -147,9 +156,8 @@ async def _run_ffmpeg_decode(
     rc = await proc.wait()
     if rc != 0:
         msg = err.decode(errors="replace").strip()
-        logger.warning(f"Request ID: {request_id} - ffmpeg exited {rc}: {msg}")
-        raise InvalidAudioError(
-            f"Could not decode audio (ffmpeg exit {rc}): {msg}")
+        logger.warning("Request ID: %s - ffmpeg exited %s: %s", request_id, rc, msg)
+        raise InvalidAudioError(f"Could not decode audio (ffmpeg exit {rc}): {msg}")
 
     audio = np.frombuffer(pcm, dtype=np.float32).copy()
     if audio.size == 0:
@@ -157,8 +165,10 @@ async def _run_ffmpeg_decode(
             "Decoded audio is empty (no audio stream or zero-length input)."
         )
     logger.info(
-        f"Request ID: {request_id} - Audio decoded "
-        f"({audio.size} samples, {audio.size / sample_rate:.2f}s)"
+        "Request ID: %s - Audio decoded (%s samples, %.2fs)",
+        request_id,
+        audio.size,
+        audio.size / sample_rate,
     )
     return audio
 
@@ -179,6 +189,7 @@ async def load_audio_from_bytes(
     async def feed(stdin):
         stdin.write(audio_bytes)
         await stdin.drain()
+
     return await _run_ffmpeg_decode("pipe:0", feed, request_id, sample_rate)
 
 
@@ -228,7 +239,8 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
     except Exception as e:
         if not isinstance(e, UploadTooLargeError):
             logger.error(
-                f"Request ID: {request_id} - Failed to read uploaded file: {e}")
+                "Request ID: %s - Failed to read uploaded file: %s", request_id, e
+            )
         with contextlib.suppress(queue.Full):
             chunk_queue.put_nowait(None)
         await asyncio.to_thread(writer_thread.join, _UPLOAD_WRITER_JOIN_TIMEOUT_SECS)
@@ -248,7 +260,8 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
             except OSError:
                 pass
         logger.error(
-            f"Request ID: {request_id} - Failed to write temp file: {write_error[0]}")
+            "Request ID: %s - Failed to write temp file: %s", request_id, write_error[0]
+        )
         raise write_error[0]
 
     return file_path
@@ -259,8 +272,9 @@ def _finalize_text(result: dict[str, Any], align_or_diarize: bool) -> dict[str, 
     if align_or_diarize and isinstance(segments, dict):
         segments = segments.get("segments", [])
 
-    result["text"] = '\n'.join([s.get("text", "").strip()
-                               for s in segments if s.get("text")])
+    result["text"] = "\n".join(
+        [s.get("text", "").strip() for s in segments if s.get("text")]
+    )
     return result
 
 
@@ -279,8 +293,7 @@ async def transcribe(
     source_url: str | None = None,
 ) -> dict[str, Any]:
     if bool(audio_file) == bool(source_url):
-        raise ValueError(
-            "transcribe requires exactly one of audio_file or source_url")
+        raise ValueError("transcribe requires exactly one of audio_file or source_url")
     start_time = time.perf_counter()
     file_path = None
     audio = None
@@ -292,6 +305,7 @@ async def transcribe(
         source_label = audio_file.filename
     else:
         from whisperx_api_server import url_fetch
+
         source_label = url_fetch.filename_from_url(source_url)
 
     stage_name = "url_download" if source_url is not None else "upload_save"
@@ -300,6 +314,7 @@ async def transcribe(
         t0 = time.perf_counter()
         if source_url is not None:
             from whisperx_api_server import url_fetch
+
             file_path = await url_fetch.download_url_to_temp(
                 source_url,
                 request_id,
@@ -313,9 +328,11 @@ async def transcribe(
             file_path = await _save_upload_to_temp(audio_file, request_id)
         profile[stage_name] = time.perf_counter() - t0
         logger.info(
-            f"Request ID: {request_id} - Saving source took {profile[stage_name]:.2f} seconds")
-        _pipe.stage_duration.labels(
-            stage=stage_name).observe(profile[stage_name])
+            "Request ID: %s - Saving source took %.2f seconds",
+            request_id,
+            profile[stage_name],
+        )
+        _pipe.stage_duration.labels(stage=stage_name).observe(profile[stage_name])
 
         # Decode outside the inference semaphore, bounded by the decode-admission semaphore.
         async with contextlib.AsyncExitStack() as _decode_stack:
@@ -326,9 +343,13 @@ async def transcribe(
             audio = await load_audio_from_path(file_path, request_id)
             profile["audio_load"] = time.perf_counter() - t0
             logger.info(
-                f"Request ID: {request_id} - Loading audio took {profile['audio_load']:.2f} seconds")
-            _pipe.stage_duration.labels(
-                stage="audio_load").observe(profile["audio_load"])
+                "Request ID: %s - Loading audio took %.2f seconds",
+                request_id,
+                profile["audio_load"],
+            )
+            _pipe.stage_duration.labels(stage="audio_load").observe(
+                profile["audio_load"]
+            )
             audio_duration_seconds = len(audio) / 16000.0
 
             if file_path and os.path.exists(file_path):
@@ -341,23 +362,30 @@ async def transcribe(
 
         selected_backends = resolve_stage_backends()
         transcription_stage_backend = get_transcription_backend(
-            selected_backends.transcription)
+            selected_backends.transcription
+        )
         alignment_stage_backend = (
             get_alignment_backend(selected_backends.alignment)
             if (align or diarize)
             else None
         )
         diarization_stage_backend = (
-            get_diarization_backend(selected_backends.diarization)
-            if diarize
-            else None
+            get_diarization_backend(selected_backends.diarization) if diarize else None
         )
 
         if not model_name:
             model_name = get_default_transcription_model_name()
 
         logger.info(
-            f"Request ID: {request_id} - Transcribing {source_label} with model: {model_name}, options: {asr_options}, language: {language}, task: {task}, stage_backends: {selected_backends}")
+            "Request ID: %s - Transcribing %s with model: %s, options: %s, language: %s, task: %s, stage_backends: %s",
+            request_id,
+            source_label,
+            model_name,
+            asr_options,
+            language,
+            task,
+            selected_backends,
+        )
 
         _sem_t0 = time.perf_counter()
         if concurrency_sem:
@@ -365,7 +393,8 @@ async def transcribe(
             await concurrency_sem.acquire()
         _sem_elapsed = time.perf_counter() - _sem_t0
         logger.debug(
-            f"Request ID: {request_id} - Acquired inference concurrency semaphore")
+            "Request ID: %s - Acquired inference concurrency semaphore", request_id
+        )
         _pipe.semaphore_wait.observe(_sem_elapsed)
 
         try:
@@ -383,13 +412,17 @@ async def transcribe(
             )
             profile["transcribe"] = time.perf_counter() - t0
             logger.info(
-                f"Request ID: {request_id} - Transcription took {profile['transcribe']:.2f} seconds")
-            _pipe.stage_duration.labels(
-                stage="transcribe").observe(profile["transcribe"])
+                "Request ID: %s - Transcription took %.2f seconds",
+                request_id,
+                profile["transcribe"],
+            )
+            _pipe.stage_duration.labels(stage="transcribe").observe(
+                profile["transcribe"]
+            )
             if audio_duration_seconds > 0:
-                _pipe.realtime_factor.labels(model=model_name, stage="transcribe").observe(
-                    profile["transcribe"] / audio_duration_seconds
-                )
+                _pipe.realtime_factor.labels(
+                    model=model_name, stage="transcribe"
+                ).observe(profile["transcribe"] / audio_duration_seconds)
 
             if align or diarize:
                 if alignment_stage_backend is None:
@@ -403,18 +436,19 @@ async def transcribe(
                 )
                 profile["align"] = time.perf_counter() - t0
                 logger.debug(
-                    f"Request ID: {request_id} - Alignment took {profile['align']:.2f} seconds")
-                _pipe.stage_duration.labels(
-                    stage="align").observe(profile["align"])
+                    "Request ID: %s - Alignment took %.2f seconds",
+                    request_id,
+                    profile["align"],
+                )
+                _pipe.stage_duration.labels(stage="align").observe(profile["align"])
                 if audio_duration_seconds > 0:
-                    _pipe.realtime_factor.labels(model=model_name, stage="align").observe(
-                        profile["align"] / audio_duration_seconds
-                    )
+                    _pipe.realtime_factor.labels(
+                        model=model_name, stage="align"
+                    ).observe(profile["align"] / audio_duration_seconds)
 
             if diarize:
                 if diarization_stage_backend is None:
-                    raise RuntimeError(
-                        "Diarization backend is not initialized.")
+                    raise RuntimeError("Diarization backend is not initialized.")
                 request_status.set_stage(request_id, "diarize")
                 t0 = time.perf_counter()
                 result = await diarization_stage_backend.diarize(
@@ -425,13 +459,15 @@ async def transcribe(
                 )
                 profile["diarize"] = time.perf_counter() - t0
                 logger.debug(
-                    f"Request ID: {request_id} - Diarization took {profile['diarize']:.2f} seconds")
-                _pipe.stage_duration.labels(
-                    stage="diarize").observe(profile["diarize"])
+                    "Request ID: %s - Diarization took %.2f seconds",
+                    request_id,
+                    profile["diarize"],
+                )
+                _pipe.stage_duration.labels(stage="diarize").observe(profile["diarize"])
                 if audio_duration_seconds > 0:
-                    _pipe.realtime_factor.labels(model=model_name, stage="diarize").observe(
-                        profile["diarize"] / audio_duration_seconds
-                    )
+                    _pipe.realtime_factor.labels(
+                        model=model_name, stage="diarize"
+                    ).observe(profile["diarize"] / audio_duration_seconds)
 
             request_status.set_stage(request_id, "finalize")
             t0 = time.perf_counter()
@@ -440,11 +476,17 @@ async def transcribe(
 
             total = time.perf_counter() - start_time
             logger.info(
-                f"Request ID: {request_id} - Transcription completed for {source_label}")
+                "Request ID: %s - Transcription completed for %s",
+                request_id,
+                source_label,
+            )
             logger.debug(
-                f"Request ID: {request_id} - profile: total={total:.2f}s | "
-                + " | ".join(f"{k}={v:.2f}s" for k, v in profile.items())
-                + f" | (other={total - sum(profile.values()):.2f}s)")
+                "Request ID: %s - profile: total=%.2fs | %s | (other=%.2fs)",
+                request_id,
+                total,
+                " | ".join(f"{k}={v:.2f}s" for k, v in profile.items()),
+                total - sum(profile.values()),
+            )
 
             request_status.mark_completed(request_id)
             return result
@@ -453,7 +495,11 @@ async def transcribe(
                 concurrency_sem.release()
     except Exception as e:
         logger.error(
-            f"Request ID: {request_id} - Transcription failed for {source_label} with error: {e}")
+            "Request ID: %s - Transcription failed for %s with error: %s",
+            request_id,
+            source_label,
+            e,
+        )
         request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise
     finally:
@@ -462,10 +508,10 @@ async def transcribe(
                 os.remove(file_path)
         if config.audio_cleanup and audio is not None:
             del audio
-            logger.info(f"Request ID: {request_id} - Audio data cleaned up")
+            logger.info("Request ID: %s - Audio data cleaned up", request_id)
         if config.cache_cleanup:
             _cleanup_cache_only()
-            logger.info(f"Request ID: {request_id} - Cache cleanup completed")
+            logger.info("Request ID: %s - Cache cleanup completed", request_id)
 
 
 class QueueFullError(Exception):
@@ -481,7 +527,8 @@ async def transcribe_via_kafka(
 ) -> dict[str, Any]:
     if bool(audio_file) == bool(source_url):
         raise ValueError(
-            "transcribe_via_kafka requires exactly one of audio_file or source_url")
+            "transcribe_via_kafka requires exactly one of audio_file or source_url"
+        )
     max_pending = config.kafka.max_pending_jobs
     if max_pending > 0 and len(kafka_client._pending_jobs) >= max_pending:
         _kafka.queue_rejected_total.inc()
@@ -493,23 +540,32 @@ async def transcribe_via_kafka(
 
     if source_url is not None:
         from whisperx_api_server import url_fetch
+
         safe_name = url_fetch.filename_from_url(source_url)
         s3_key: str | None = None
         logger.info(
-            f"Request ID: {request_id} - Forwarding source URL to worker (skipping S3 upload)")
+            "Request ID: %s - Forwarding source URL to worker (skipping S3 upload)",
+            request_id,
+        )
     else:
         safe_name = _safe_filename(audio_file.filename)
         request_status.set_stage(request_id, "uploading_to_s3")
-        logger.info(f"Request ID: {request_id} - Uploading audio to S3")
+        logger.info("Request ID: %s - Uploading audio to S3", request_id)
         try:
-            s3_key = await s3_client.upload_audio_stream(audio_file, request_id, safe_name)
+            s3_key = await s3_client.upload_audio_stream(
+                audio_file, request_id, safe_name
+            )
         except Exception as e:
             request_status.mark_failed(request_id, str(e), type(e).__name__)
             raise
 
     request_status.set_stage(request_id, "submitted_to_kafka")
     logger.info(
-        f"Request ID: {request_id} - Submitting job to Kafka (s3_key={s3_key}, audio_url={'set' if source_url else None})")
+        "Request ID: %s - Submitting job to Kafka (s3_key=%s, audio_url=%s)",
+        request_id,
+        s3_key,
+        "set" if source_url else None,
+    )
     try:
         future = await kafka_client.submit_job(
             request_id, s3_key, source_url, safe_name, params
@@ -520,20 +576,21 @@ async def transcribe_via_kafka(
 
     request_status.set_stage(request_id, "awaiting_worker")
     try:
-        result = await asyncio.wait_for(future, timeout=config.kafka.reply_timeout_seconds)
-        logger.info(f"Request ID: {request_id} - Received result from worker")
+        result = await asyncio.wait_for(
+            future, timeout=config.kafka.reply_timeout_seconds
+        )
+        logger.info("Request ID: %s - Received result from worker", request_id)
         request_status.mark_completed(request_id)
         return result
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as timeout_exc:
         kafka_client._pending_jobs.pop(request_id, None)
         _kafka.job_timeout_total.inc()
-        logger.error(
-            f"Request ID: {request_id} - Timed out waiting for worker reply")
+        logger.error("Request ID: %s - Timed out waiting for worker reply", request_id)
         err = TimeoutError(
             f"Job {request_id} timed out after {config.kafka.reply_timeout_seconds}s"
         )
         request_status.mark_failed(request_id, str(err), "TimeoutError")
-        raise err
+        raise err from timeout_exc
     except BaseException as e:
         kafka_client._pending_jobs.pop(request_id, None)
         request_status.mark_failed(request_id, str(e), type(e).__name__)

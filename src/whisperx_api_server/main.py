@@ -400,3 +400,15 @@ def create_app() -> FastAPI:
     app.add_middleware(GracefulShutdownMiddleware, app_state=app.state)
 
     return app
+
+
+def start() -> None:
+    import uvicorn
+
+    config = get_config()
+    uvicorn.run(
+        "whisperx_api_server.main:create_app",
+        factory=True,
+        host=config.host,
+        port=config.port,
+    )

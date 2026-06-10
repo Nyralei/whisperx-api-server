@@ -256,6 +256,28 @@ Only the `whisperx` backend ships by default. Custom backends can be registered 
 
 Every runtime variant is gated by exactly one profile, so `docker compose up` never accidentally starts a GPU process on a machine that doesn't have one and observability stacks never spawn duplicate API servers.
 
+## Local Installation (pip / uv)
+
+```bash
+# API server for the distributed (Kafka) setup — no ML dependencies required:
+pip install ".[kafka]"
+
+# API server with local inference (direct mode):
+pip install ".[cpu]"        # or ".[cuda]" for GPU
+
+# Kafka worker:
+pip install ".[cpu,kafka]"  # or ".[cuda,kafka]"
+```
+
+Two console scripts are installed:
+
+```bash
+whisperx-api      # start the API server (UVICORN_HOST:UVICORN_PORT, default 0.0.0.0:8000)
+whisperx-worker   # start a Kafka worker
+```
+
+Without the `cpu`/`cuda` extras, PyTorch and WhisperX are not installed. Such a server can still take requests and hand them to workers in Kafka mode, but direct-mode inference and the subtitle response formats (`srt`, `vtt`, `vtt_json`, `aud`) need the ML extras and return a clear error otherwise.
+
 ## Contributing
 
 Issues, forks, and pull requests are welcome.

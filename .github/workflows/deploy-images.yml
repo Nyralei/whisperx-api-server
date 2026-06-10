@@ -25,11 +25,11 @@ jobs:
           - target: cpu-kafka
             file: ./Dockerfile.cpu
             image: whisperx-api-server
-            build_args: "EXTRA_EXTRAS=--extra kafka"
+            build_args: "UV_EXTRA_ARGS=--extra kafka"
           - target: cuda-kafka
             file: ./Dockerfile.cuda
             image: whisperx-api-server
-            build_args: "EXTRA_EXTRAS=--extra kafka"
+            build_args: "UV_EXTRA_ARGS=--extra kafka"
           - target: worker-cpu
             file: ./Dockerfile.worker-cpu
             image: whisperx-worker

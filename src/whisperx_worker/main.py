@@ -307,5 +307,9 @@ async def run_worker() -> None:
         logger.info("Worker shut down")
 
 
-if __name__ == "__main__":
+def main() -> None:
     asyncio.run(run_worker())
+
+
+if __name__ == "__main__":
+    main()

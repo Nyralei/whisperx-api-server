@@ -14,6 +14,10 @@ dependencies = [
     "python-multipart>=0.0.20",
 ]
 
+[project.scripts]
+whisperx-api = "whisperx_api_server.main:start"
+whisperx-worker = "whisperx_worker.main:main"
+
 [project.optional-dependencies]
 cpu = [
     "whisperx~=3.8.6",
@@ -52,8 +56,8 @@ requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["whisperx_api_server*"]
+where = ["src"]
+include = ["whisperx_api_server*", "whisperx_worker*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

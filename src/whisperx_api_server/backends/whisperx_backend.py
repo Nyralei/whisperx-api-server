@@ -42,7 +42,6 @@ from .whisperx_runtime import (
 )
 
 logger = logging.getLogger(__name__)
-config = get_config()
 
 _DEFAULT_ASR_OPTIONS = {
     "suppress_numerals": True,
@@ -82,10 +81,10 @@ def _apply_request_options(
 
 class WhisperXTranscriptionBackend:
     def get_default_model_name(self) -> str:
-        return config.whisper.model
+        return get_config().whisper.model
 
     async def preload_default(self) -> None:
-        if not config.whisper.preload_model:
+        if not get_config().whisper.preload_model:
             return
         await load_transcribe_pipeline(model_name=self.get_default_model_name())
 
@@ -136,7 +135,9 @@ class WhisperXTranscriptionBackend:
         loop = asyncio.get_running_loop()
         lang = getattr(language, "value", language) if language else None
         num_workers = (
-            0 if determine_inference_device() == "cuda" else config.whisper.num_workers
+            0
+            if determine_inference_device() == "cuda"
+            else get_config().whisper.num_workers
         )
 
         model_load_start = time.perf_counter()
@@ -190,6 +191,7 @@ class WhisperXTranscriptionBackend:
 
 class WhisperXAlignmentBackend:
     async def preload_default(self) -> None:
+        config = get_config()
         if not config.alignment.preload_model:
             return
         if config.alignment.preload_model_name:
@@ -289,6 +291,7 @@ class WhisperXAlignmentBackend:
 
 class WhisperXDiarizationBackend:
     async def preload_default(self) -> None:
+        config = get_config()
         if not config.diarization.preload_model:
             return
         await load_diarize_pipeline(model_name=config.diarization.model)
@@ -327,6 +330,7 @@ class WhisperXDiarizationBackend:
                 "Diarization backend requires 'segments' in transcription result."
             )
 
+        config = get_config()
         loop = asyncio.get_running_loop()
         diarization_model_start = time.perf_counter()
         logger.info(

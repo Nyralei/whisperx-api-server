@@ -33,8 +33,6 @@ from whisperx_api_server.observability import pipeline as _pipe
 
 logger = logging.getLogger(__name__)
 
-config = get_config()
-
 _concurrency_semaphore: asyncio.Semaphore | None = None
 _decode_semaphore: asyncio.Semaphore | None = None
 _UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
@@ -73,7 +71,7 @@ def _safe_filename_suffix(filename: str | None) -> str:
 def init_concurrency() -> None:
     """Eagerly create the inference and decode-admission semaphores. Called once from lifespan."""
     global _concurrency_semaphore, _decode_semaphore
-    n = config.max_concurrent_transcriptions
+    n = get_config().max_concurrent_transcriptions
     _concurrency_semaphore = asyncio.Semaphore(n) if n > 0 else None
     # Decode admission: allows one more concurrent decode than inference slots so a new
     # request can decode while the previous one is still on the model executor.
@@ -195,7 +193,7 @@ async def load_audio_from_bytes(
 
 async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
     """Stream upload to temp file in chunks. Enforces max_upload_size_bytes if set."""
-    max_bytes = config.max_upload_size_bytes
+    max_bytes = get_config().max_upload_size_bytes
     suffix = _safe_filename_suffix(audio_file.filename)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         file_path = tmp.name
@@ -280,10 +278,10 @@ def _finalize_text(result: dict[str, Any], align_or_diarize: bool) -> dict[str, 
 
 async def transcribe(
     audio_file: UploadFile | None = None,
-    batch_size: int = config.whisper.batch_size,
-    chunk_size: int = config.whisper.chunk_size,
+    batch_size: int | None = None,
+    chunk_size: int | None = None,
     asr_options: dict | None = None,
-    language: Language = config.default_language,
+    language: Language | None = None,
     model_name: str | None = None,
     align: bool = False,
     diarize: bool = False,
@@ -294,6 +292,13 @@ async def transcribe(
 ) -> dict[str, Any]:
     if bool(audio_file) == bool(source_url):
         raise ValueError("transcribe requires exactly one of audio_file or source_url")
+    config = get_config()
+    if batch_size is None:
+        batch_size = config.whisper.batch_size
+    if chunk_size is None:
+        chunk_size = config.whisper.chunk_size
+    if language is None:
+        language = config.default_language
     start_time = time.perf_counter()
     file_path = None
     audio = None
@@ -529,6 +534,7 @@ async def transcribe_via_kafka(
         raise ValueError(
             "transcribe_via_kafka requires exactly one of audio_file or source_url"
         )
+    config = get_config()
     max_pending = config.kafka.max_pending_jobs
     if max_pending > 0 and len(kafka_client._pending_jobs) >= max_pending:
         _kafka.queue_rejected_total.inc()

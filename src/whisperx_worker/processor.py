@@ -25,7 +25,6 @@ from whisperx_api_server.transcriber import (
 from whisperx_worker.progress import publish_stage
 
 logger = logging.getLogger(__name__)
-config = get_config()
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -50,6 +49,7 @@ async def process_job(
     progress_topic: str | None = None,
     timeline_out: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
+    config = get_config()
     job_id = event["job_id"]
     s3_key = event.get("s3_key")
     audio_url = event.get("audio_url")

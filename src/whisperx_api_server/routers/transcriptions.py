@@ -68,8 +68,6 @@ def _raise_for_transcription_error(request_id: str, e: Exception, kind: str) -> 
 
 logger = logging.getLogger(__name__)
 
-config = get_config()
-
 router = APIRouter()
 
 # OpenAI clients send model="whisper-1" as a placeholder; treat that — and an omitted
@@ -141,9 +139,9 @@ async def transcribe_audio(
     file: Annotated[UploadFile | None, File()] = None,
     audio_url: Annotated[str | None, Form()] = None,
     model: Annotated[str | None, Form()] = None,
-    language: Annotated[Language, Form()] = config.default_language,
+    language: Annotated[Language | None, Form()] = None,
     prompt: Annotated[str, Form()] = None,
-    response_format: Annotated[ResponseFormat, Form()] = config.default_response_format,
+    response_format: Annotated[ResponseFormat | None, Form()] = None,
     temperature: Annotated[float, Form()] = 0.0,
     timestamp_granularities: Annotated[
         list[Literal["segment", "word"]] | None,
@@ -156,9 +154,18 @@ async def transcribe_audio(
     align: Annotated[bool, Form()] = True,
     diarize: Annotated[bool, Form()] = False,
     speaker_embeddings: Annotated[bool, Form()] = False,
-    chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
-    batch_size: Annotated[int, Form()] = config.whisper.batch_size,
+    chunk_size: Annotated[int | None, Form()] = None,
+    batch_size: Annotated[int | None, Form()] = None,
 ) -> Response:
+    config = get_config()
+    if language is None:
+        language = config.default_language
+    if response_format is None:
+        response_format = config.default_response_format
+    if chunk_size is None:
+        chunk_size = config.whisper.chunk_size
+    if batch_size is None:
+        batch_size = config.whisper.batch_size
     timestamp_granularities = get_timestamp_granularities(timestamp_granularities)
     request_id = request.state.request_id
     logger.info("Request ID: %s - Received transcription request", request_id)
@@ -318,11 +325,18 @@ async def translate_audio(
     audio_url: Annotated[str | None, Form()] = None,
     model: Annotated[str | None, Form()] = None,
     prompt: Annotated[str, Form()] = "",
-    response_format: Annotated[ResponseFormat, Form()] = config.default_response_format,
+    response_format: Annotated[ResponseFormat | None, Form()] = None,
     temperature: Annotated[float, Form()] = 0.0,
-    chunk_size: Annotated[int, Form()] = config.whisper.chunk_size,
-    batch_size: Annotated[int, Form()] = config.whisper.batch_size,
+    chunk_size: Annotated[int | None, Form()] = None,
+    batch_size: Annotated[int | None, Form()] = None,
 ) -> Response:
+    config = get_config()
+    if response_format is None:
+        response_format = config.default_response_format
+    if chunk_size is None:
+        chunk_size = config.whisper.chunk_size
+    if batch_size is None:
+        batch_size = config.whisper.batch_size
     request_id = request.state.request_id
     logger.info("Request ID: %s - Received translation request", request_id)
     start_time = time.time()

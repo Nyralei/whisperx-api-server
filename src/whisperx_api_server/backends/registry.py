@@ -13,8 +13,6 @@ from .contracts import (
     TranscriptionBackend,
 )
 
-config = get_config()
-
 _VALID_BACKEND_NAME = re.compile(r"^[a-z0-9_]+$")
 
 _transcription_backends: dict[str, TranscriptionBackend] = {}
@@ -108,17 +106,17 @@ def register_diarization_backend(
 
 
 def list_transcription_backends() -> list[str]:
-    _try_auto_register_backend(config.backends.transcription)
+    _try_auto_register_backend(get_config().backends.transcription)
     return sorted(_transcription_backends.keys())
 
 
 def list_alignment_backends() -> list[str]:
-    _try_auto_register_backend(config.backends.alignment)
+    _try_auto_register_backend(get_config().backends.alignment)
     return sorted(_alignment_backends.keys())
 
 
 def list_diarization_backends() -> list[str]:
-    _try_auto_register_backend(config.backends.diarization)
+    _try_auto_register_backend(get_config().backends.diarization)
     return sorted(_diarization_backends.keys())
 
 
@@ -174,6 +172,7 @@ def get_diarization_backend(backend_name: str) -> DiarizationBackend:
 
 
 def resolve_stage_backends() -> StageBackendSelection:
+    config = get_config()
     return StageBackendSelection(
         transcription=_normalize_backend_name(
             config.backends.transcription,

@@ -10,6 +10,7 @@ DNS rebinding is out of scope: getaddrinfo runs once and aiohttp re-resolves
 on connect. Defense in depth (resolve-then-pin-IP with explicit Host header)
 is a follow-up if the threat model demands it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,17 +20,17 @@ import logging
 import os
 import socket
 import tempfile
-from urllib.parse import urlsplit, unquote
+from urllib.parse import unquote, urlsplit
 
 import aiohttp
 
 from whisperx_api_server.transcriber import (
+    _UPLOAD_STREAM_CHUNK_SIZE,
+    _UPLOAD_WRITE_BUFFER_SIZE,
     InvalidAudioError,
     UploadTooLargeError,
     _safe_filename,
     _safe_filename_suffix,
-    _UPLOAD_STREAM_CHUNK_SIZE,
-    _UPLOAD_WRITE_BUFFER_SIZE,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,19 +117,21 @@ async def validate_url_for_fetch(
         ips = await _resolve_host(hostname)
     except socket.gaierror as e:
         logger.warning(
-            f"URL validation: DNS resolution failed for {_redact_url(url)}: {e}"
+            "URL validation: DNS resolution failed for %s: %s", _redact_url(url), e
         )
         raise InvalidAudioError("Source URL host could not be resolved") from e
 
     if any(_ip_is_unsafe(ip) for ip in ips):
         logger.warning(
-            f"URL validation: rejected host for {_redact_url(url)} "
-            f"(resolved IPs include private/loopback/link-local)"
+            "URL validation: rejected host for %s (resolved IPs include private/loopback/link-local)",
+            _redact_url(url),
         )
         raise InvalidAudioError(_REJECTED_HOST_MSG)
 
 
-def _client_timeout(connect_timeout: float, total_timeout: float) -> aiohttp.ClientTimeout:
+def _client_timeout(
+    connect_timeout: float, total_timeout: float
+) -> aiohttp.ClientTimeout:
     return aiohttp.ClientTimeout(total=total_timeout, connect=connect_timeout)
 
 
@@ -162,11 +165,11 @@ async def _open_get(
     except (InvalidAudioError, UploadTooLargeError):
         raise
     except asyncio.TimeoutError as e:
-        logger.warning(f"URL fetch timed out for {_redact_url(url)}")
+        logger.warning("URL fetch timed out for %s", _redact_url(url))
         raise InvalidAudioError(f"{_FETCH_FAILED_MSG} (timeout)") from e
     except aiohttp.ClientError as e:
         logger.warning(
-            f"URL fetch failed for {_redact_url(url)}: {type(e).__name__}"
+            "URL fetch failed for %s: %s", _redact_url(url), type(e).__name__
         )
         raise InvalidAudioError(_FETCH_FAILED_MSG) from e
 
@@ -217,7 +220,9 @@ async def download_url_to_temp(
         ) as response:
             _check_content_length(response.headers, max_bytes)
             with open(file_path, "wb", buffering=_UPLOAD_WRITE_BUFFER_SIZE) as f:
-                async for chunk in response.content.iter_chunked(_UPLOAD_STREAM_CHUNK_SIZE):
+                async for chunk in response.content.iter_chunked(
+                    _UPLOAD_STREAM_CHUNK_SIZE
+                ):
                     if not chunk:
                         continue
                     total += len(chunk)
@@ -237,7 +242,7 @@ async def download_url_to_temp(
         raise InvalidAudioError("Source URL returned an empty response.")
 
     logger.info(
-        f"Request ID: {request_id} - URL fetch wrote {total} bytes to temp file"
+        "Request ID: %s - URL fetch wrote %s bytes to temp file", request_id, total
     )
     return file_path
 
@@ -278,5 +283,5 @@ async def download_url_to_bytes(
     if not buf:
         raise InvalidAudioError("Source URL returned an empty response.")
 
-    logger.info(f"Job {job_id}: URL fetch read {len(buf)} bytes")
+    logger.info("Job %s: URL fetch read %s bytes", job_id, len(buf))
     return bytes(buf)

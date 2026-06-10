@@ -13,8 +13,6 @@ from .contracts import (
     TranscriptionBackend,
 )
 
-config = get_config()
-
 _VALID_BACKEND_NAME = re.compile(r"^[a-z0-9_]+$")
 
 _transcription_backends: dict[str, TranscriptionBackend] = {}
@@ -51,7 +49,9 @@ def _try_auto_register_backend(backend_name: str) -> None:
         with _backend_registration_lock:
             _backend_registration_attempted.discard(normalized)
         raise BackendSelectionError(
-            f"Failed importing backend module '{module_name}': {e}"
+            f"Failed importing backend module '{module_name}': {e}. "
+            "If this is a missing ML dependency, install the ML extras "
+            "(whisperx-api-server[cpu] or [cuda])."
         ) from e
     except Exception as e:
         with _backend_registration_lock:
@@ -86,38 +86,39 @@ def register_transcription_backend(
     backend_name: str,
     backend: TranscriptionBackend,
 ) -> None:
-    _transcription_backends[_normalize_backend_name(
-        backend_name, "transcription")] = backend
+    _transcription_backends[_normalize_backend_name(backend_name, "transcription")] = (
+        backend
+    )
 
 
 def register_alignment_backend(
     backend_name: str,
     backend: AlignmentBackend,
 ) -> None:
-    _alignment_backends[_normalize_backend_name(
-        backend_name, "alignment")] = backend
+    _alignment_backends[_normalize_backend_name(backend_name, "alignment")] = backend
 
 
 def register_diarization_backend(
     backend_name: str,
     backend: DiarizationBackend,
 ) -> None:
-    _diarization_backends[_normalize_backend_name(
-        backend_name, "diarization")] = backend
+    _diarization_backends[_normalize_backend_name(backend_name, "diarization")] = (
+        backend
+    )
 
 
 def list_transcription_backends() -> list[str]:
-    _try_auto_register_backend(config.backends.transcription)
+    _try_auto_register_backend(get_config().backends.transcription)
     return sorted(_transcription_backends.keys())
 
 
 def list_alignment_backends() -> list[str]:
-    _try_auto_register_backend(config.backends.alignment)
+    _try_auto_register_backend(get_config().backends.alignment)
     return sorted(_alignment_backends.keys())
 
 
 def list_diarization_backends() -> list[str]:
-    _try_auto_register_backend(config.backends.diarization)
+    _try_auto_register_backend(get_config().backends.diarization)
     return sorted(_diarization_backends.keys())
 
 
@@ -127,8 +128,7 @@ def _build_unknown_backend_error(
     backend_name: str,
     available_backends: list[str],
 ) -> BackendSelectionError:
-    available_value = ", ".join(
-        available_backends) if available_backends else "none"
+    available_value = ", ".join(available_backends) if available_backends else "none"
     return BackendSelectionError(
         f"Unknown {stage} backend '{backend_name}'. Available backends: {available_value}."
     )
@@ -174,6 +174,7 @@ def get_diarization_backend(backend_name: str) -> DiarizationBackend:
 
 
 def resolve_stage_backends() -> StageBackendSelection:
+    config = get_config()
     return StageBackendSelection(
         transcription=_normalize_backend_name(
             config.backends.transcription,

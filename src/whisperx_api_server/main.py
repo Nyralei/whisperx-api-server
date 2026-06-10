@@ -4,46 +4,39 @@ import logging
 import re
 import signal
 import uuid
-from fastapi import (
-    FastAPI,
-    Request
-)
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Scope, Receive, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from whisperx_api_server.config import DistributedMode
-from whisperx_api_server.dependencies import ApiKeyDependency, get_config
-from whisperx_api_server.logger import setup_logger
-
+from whisperx_api_server import request_status
 from whisperx_api_server.backends.registry import (
     get_alignment_backend,
     get_diarization_backend,
     get_transcription_backend,
     resolve_stage_backends,
 )
-
-from whisperx_api_server.routers.observability import (
-    info_router,
-    router as observability_router,
-)
-
+from whisperx_api_server.config import DistributedMode
+from whisperx_api_server.dependencies import ApiKeyDependency, get_config
+from whisperx_api_server.logger import setup_logger
 from whisperx_api_server.routers.models import (
     router as models_router,
 )
-
-from whisperx_api_server.routers.transcriptions import (
-    router as transcribe_router,
+from whisperx_api_server.routers.observability import (
+    info_router,
 )
-
+from whisperx_api_server.routers.observability import (
+    router as observability_router,
+)
 from whisperx_api_server.routers.status import (
     router as status_router,
 )
-
-from whisperx_api_server import request_status
-
+from whisperx_api_server.routers.transcriptions import (
+    router as transcribe_router,
+)
 
 _REQUEST_ID_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -72,9 +65,7 @@ class GracefulShutdownMiddleware:
     do not flip the pod to CrashLoopBackoff before drain finishes.
     """
 
-    _DRAIN_PASSTHROUGH_PATHS: frozenset[str] = frozenset(
-        {"/metrics", "/healthcheck"}
-    )
+    _DRAIN_PASSTHROUGH_PATHS: frozenset[str] = frozenset({"/metrics", "/healthcheck"})
 
     def __init__(self, app: ASGIApp, app_state) -> None:
         self.app = app
@@ -112,7 +103,9 @@ class GracefulShutdownMiddleware:
                     drain_event.set()
 
 
-async def _drain_inflight(app_state, grace_seconds: int, logger: logging.Logger) -> None:
+async def _drain_inflight(
+    app_state, grace_seconds: int, logger: logging.Logger
+) -> None:
     """Wait up to `grace_seconds` for the in-flight counter to reach zero."""
     if app_state.inflight <= 0:
         return
@@ -176,10 +169,12 @@ async def lifespan(app: FastAPI):
             "SIGTERM handler unavailable on this platform; relying on lifespan teardown"
         )
 
-    gpu_task: "asyncio.Task | None" = None
+    gpu_task: asyncio.Task | None = None
     if config.metrics.enabled:
         from whisperx_api_server.observability import gpu as _gpu
+
         if _gpu._pynvml_ok:
+
             def _on_gpu_task_done(task: asyncio.Task) -> None:
                 if not task.cancelled() and task.exception() is not None:
                     logger.error(
@@ -189,15 +184,19 @@ async def lifespan(app: FastAPI):
 
             gpu_task = asyncio.create_task(
                 _gpu._gpu_poll_loop(
-                    config.metrics.gpu_poll_interval, _gpu._nvml_handle),
+                    config.metrics.gpu_poll_interval, _gpu._nvml_handle
+                ),
                 name="gpu-metrics-poller",
             )
             gpu_task.add_done_callback(_on_gpu_task_done)
-            logger.info("GPU metrics poller started (interval=%ss)",
-                        config.metrics.gpu_poll_interval)
+            logger.info(
+                "GPU metrics poller started (interval=%ss)",
+                config.metrics.gpu_poll_interval,
+            )
 
-    from whisperx_api_server.transcriber import init_concurrency
     from whisperx_api_server.executors import shutdown_executors
+    from whisperx_api_server.transcriber import init_concurrency
+
     init_concurrency()
 
     def _on_status_cleanup_done(task: asyncio.Task) -> None:
@@ -216,15 +215,18 @@ async def lifespan(app: FastAPI):
     if config.alignment.nltk_preload:
         try:
             import nltk
+
             await asyncio.to_thread(nltk.download, "punkt_tab", quiet=True)
             logger.info("NLTK punkt_tab preloaded")
         except Exception:
             logger.warning(
-                "NLTK punkt_tab preload failed; will be downloaded on first alignment request")
+                "NLTK punkt_tab preload failed; will be downloaded on first alignment request"
+            )
 
     try:
         if config.mode == DistributedMode.KAFKA:
-            from whisperx_api_server import s3_client, kafka_client
+            from whisperx_api_server import kafka_client, s3_client
+
             await s3_client.init_client(config.s3)
             await kafka_client.start(config.kafka)
 
@@ -269,30 +271,36 @@ async def lifespan(app: FastAPI):
         else:
             selected_backends = resolve_stage_backends()
             logger.info(
-                f"Configured stage backends: transcription={selected_backends.transcription}, "
-                f"alignment={selected_backends.alignment}, diarization={selected_backends.diarization}"
+                "Configured stage backends: transcription=%s, alignment=%s, diarization=%s",
+                selected_backends.transcription,
+                selected_backends.alignment,
+                selected_backends.diarization,
             )
             try:
                 transcription_backend = get_transcription_backend(
-                    selected_backends.transcription)
+                    selected_backends.transcription
+                )
                 await transcription_backend.preload_default()
             except Exception:
                 logger.exception(
-                    "Failed to preload transcription backend; will try to load on demand")
+                    "Failed to preload transcription backend; will try to load on demand"
+                )
             try:
-                alignment_backend = get_alignment_backend(
-                    selected_backends.alignment)
+                alignment_backend = get_alignment_backend(selected_backends.alignment)
                 await alignment_backend.preload_default()
             except Exception:
                 logger.exception(
-                    "Failed to preload alignment backend; will try to load on demand")
+                    "Failed to preload alignment backend; will try to load on demand"
+                )
             try:
                 diarization_backend = get_diarization_backend(
-                    selected_backends.diarization)
+                    selected_backends.diarization
+                )
                 await diarization_backend.preload_default()
             except Exception:
                 logger.exception(
-                    "Failed to preload diarization backend; will try to load on demand")
+                    "Failed to preload diarization backend; will try to load on demand"
+                )
             yield
     finally:
         # Flip the drain flag before teardown so any final in-flight requests
@@ -323,13 +331,16 @@ def create_app() -> FastAPI:
     setup_logger(config.log_level)
     logger = logging.getLogger(__name__)
 
-    logger.debug(f"Config: {config}")
+    logger.debug("Config: %s", config)
 
     dependencies = []
     if config.api_key is not None or config.api_keys_file is not None:
         dependencies.append(ApiKeyDependency)
 
     app = FastAPI(lifespan=lifespan)
+    app.state.shutting_down = False
+    app.state.inflight = 0
+    app.state.drain_event = None
 
     # Observability router hosts unauthenticated /healthcheck (and /metrics when
     # METRICS_ENABLED=true — /metrics is registered directly on `app` below).
@@ -345,6 +356,7 @@ def create_app() -> FastAPI:
         setup_metrics(config.metrics)
 
         from whisperx_api_server.observability.http import MetricsMiddleware
+
         app.add_middleware(MetricsMiddleware)
 
         from fastapi import Response as FastAPIResponse
@@ -357,8 +369,7 @@ def create_app() -> FastAPI:
                 media_type=CONTENT_TYPE_LATEST,
             )
 
-        logger.info(
-            "Observability: /metrics endpoint registered (unauthenticated)")
+        logger.info("Observability: /metrics endpoint registered (unauthenticated)")
 
     # Model-management endpoints operate on the API process's local cache.
     # In Kafka mode the API process never loads models (the worker does), so

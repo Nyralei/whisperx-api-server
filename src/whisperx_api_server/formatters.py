@@ -1,6 +1,6 @@
-from whisperx.utils import WriteSRT, WriteVTT, WriteAudacity
 from fastapi.responses import JSONResponse, Response
-from whisperx_api_server.config import MediaType
+
+from whisperx_api_server.config import MediaType, ResponseFormat
 
 
 class ListWriter:
@@ -13,7 +13,7 @@ class ListWriter:
         self.lines.append(text)
 
     def get_output(self):
-        return ''.join(self.lines)
+        return "".join(self.lines)
 
     def flush(self):
         pass
@@ -28,21 +28,37 @@ def update_options(kwargs, defaults):
     :return: Updated options dictionary.
     """
     options = defaults.copy()
-    options.update({key: kwargs.get(key, value)
-                   for key, value in defaults.items()})
+    options.update({key: kwargs.get(key, value) for key, value in defaults.items()})
     return options
 
 
-def handle_whisperx_format(transcript, writer_class, options):
+def _get_whisperx_writer(writer_format: ResponseFormat):
+    try:
+        from whisperx.utils import WriteAudacity, WriteSRT, WriteVTT
+    except ImportError as e:
+        raise RuntimeError(
+            f"response_format '{writer_format}' requires the whisperx package. "
+            "Install the ML extras (whisperx-api-server[cpu] or [cuda]) to enable "
+            "subtitle output formats."
+        ) from e
+    return {
+        ResponseFormat.SRT: WriteSRT,
+        ResponseFormat.VTT: WriteVTT,
+        ResponseFormat.VTT_JSON: WriteVTT,
+        ResponseFormat.AUD: WriteAudacity,
+    }[ResponseFormat(writer_format)]
+
+
+def handle_whisperx_format(transcript, writer_format, options):
     """
-    Helper function to handle "srt", "vtt" and "aud" formats using whisperx writers.
+    Helper function to handle "srt", "vtt", "vtt_json" and "aud" formats using whisperx writers.
 
     :param transcript: The transcript dictionary.
-    :param writer_class: The writer class (WriteSRT, WriteVTT or WriteAudacity).
+    :param writer_format: The requested ResponseFormat.
     :param options: Options for the writer.
     :return: Formatted output as a string.
     """
-    writer = writer_class(output_dir=None)
+    writer = _get_whisperx_writer(writer_format)(output_dir=None)
     output = ListWriter()
     segments = transcript.get("segments")
     if isinstance(segments, list):
@@ -55,7 +71,8 @@ def handle_whisperx_format(transcript, writer_class, options):
         writer_input.setdefault("language", transcript.get("language"))
     else:
         raise ValueError(
-            "Invalid transcript payload: 'segments' must be a list or dict.")
+            "Invalid transcript payload: 'segments' must be a list or dict."
+        )
 
     writer.write_result(writer_input, output, options)
 
@@ -81,23 +98,26 @@ def format_transcription(transcript, format, **kwargs) -> Response:
 
     if format == "json":
         response_data = {"text": transcript.get("text", "")}
-        return JSONResponse(content=response_data, media_type=MediaType.APPLICATION_JSON)
+        return JSONResponse(
+            content=response_data, media_type=MediaType.APPLICATION_JSON
+        )
     elif format == "verbose_json":
         return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
     elif format == "vtt_json":
-        transcript["vtt_text"] = handle_whisperx_format(
-            transcript, WriteVTT, options)
+        transcript["vtt_text"] = handle_whisperx_format(transcript, format, options)
         return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
     elif format == "text":
-        return Response(content=transcript.get("text", ""), media_type=MediaType.TEXT_PLAIN)
+        return Response(
+            content=transcript.get("text", ""), media_type=MediaType.TEXT_PLAIN
+        )
     elif format == "srt":
-        content = handle_whisperx_format(transcript, WriteSRT, options)
+        content = handle_whisperx_format(transcript, format, options)
         return Response(content=content, media_type=MediaType.TEXT_PLAIN)
     elif format == "vtt":
-        content = handle_whisperx_format(transcript, WriteVTT, options)
+        content = handle_whisperx_format(transcript, format, options)
         return Response(content=content, media_type=MediaType.TEXT_VTT)
     elif format == "aud":
-        content = handle_whisperx_format(transcript, WriteAudacity, options)
+        content = handle_whisperx_format(transcript, format, options)
         return Response(content=content, media_type=MediaType.TEXT_PLAIN)
     else:
         raise ValueError(f"Unsupported format: {format}")

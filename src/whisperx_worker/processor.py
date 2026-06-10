@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import time
@@ -6,27 +5,26 @@ from typing import Any
 
 import numpy as np
 
+import whisperx_api_server.s3_client as s3_client
+from whisperx_api_server import url_fetch
 from whisperx_api_server.backends.registry import (
     get_alignment_backend,
+    get_default_transcription_model_name,
     get_diarization_backend,
     get_transcription_backend,
-    get_default_transcription_model_name,
     resolve_stage_backends,
 )
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.transcriber import (
-    load_audio_from_bytes,
-    _finalize_text,
     _cleanup_cache_only,
+    _finalize_text,
     _get_concurrency_semaphore,
+    load_audio_from_bytes,
 )
-from whisperx_api_server import url_fetch
-import whisperx_api_server.s3_client as s3_client
 from whisperx_worker.progress import publish_stage
 
 logger = logging.getLogger(__name__)
-config = get_config()
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -51,6 +49,7 @@ async def process_job(
     progress_topic: str | None = None,
     timeline_out: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
+    config = get_config()
     job_id = event["job_id"]
     s3_key = event.get("s3_key")
     audio_url = event.get("audio_url")
@@ -95,7 +94,7 @@ async def process_job(
         if audio_url is not None:
             await _progress("url_download")
             t0 = time.perf_counter()
-            logger.info(f"Job {job_id}: downloading audio from URL")
+            logger.info("Job %s: downloading audio from URL", job_id)
             audio_bytes = await url_fetch.download_url_to_bytes(
                 audio_url,
                 job_id,
@@ -107,16 +106,19 @@ async def process_job(
             )
             profile["url_download"] = time.perf_counter() - t0
             logger.info(
-                f"Job {job_id}: URL download took {profile['url_download']:.2f} seconds")
+                "Job %s: URL download took %.2f seconds",
+                job_id,
+                profile["url_download"],
+            )
         else:
             await _progress("s3_download")
             t0 = time.perf_counter()
-            logger.info(
-                f"Job {job_id}: downloading audio from S3 (key: {s3_key})")
+            logger.info("Job %s: downloading audio from S3 (key: %s)", job_id, s3_key)
             audio_bytes = await s3_client.download_audio(s3_key)
             profile["s3_download"] = time.perf_counter() - t0
             logger.info(
-                f"Job {job_id}: S3 download took {profile['s3_download']:.2f} seconds")
+                "Job %s: S3 download took %.2f seconds", job_id, profile["s3_download"]
+            )
 
         await _progress("audio_load")
         t0 = time.perf_counter()
@@ -124,34 +126,49 @@ async def process_job(
         profile["audio_load"] = time.perf_counter() - t0
         del audio_bytes
         logger.info(
-            f"Job {job_id}: loading audio took {profile['audio_load']:.2f} seconds")
+            "Job %s: loading audio took %.2f seconds", job_id, profile["audio_load"]
+        )
 
         if concurrency_sem:
             await _progress("awaiting_gpu")
             await concurrency_sem.acquire()
-            logger.debug(f"Job {job_id}: acquired GPU concurrency semaphore")
+            logger.debug("Job %s: acquired GPU concurrency semaphore", job_id)
 
         try:
             selected_backends = resolve_stage_backends()
             transcription_backend = get_transcription_backend(
-                selected_backends.transcription)
-            alignment_backend = get_alignment_backend(
-                selected_backends.alignment) if (align or diarize) else None
-            diarization_backend = get_diarization_backend(
-                selected_backends.diarization) if diarize else None
+                selected_backends.transcription
+            )
+            alignment_backend = (
+                get_alignment_backend(selected_backends.alignment)
+                if (align or diarize)
+                else None
+            )
+            diarization_backend = (
+                get_diarization_backend(selected_backends.diarization)
+                if diarize
+                else None
+            )
 
-            model_name = params.get(
-                "model_name") or get_default_transcription_model_name()
+            model_name = (
+                params.get("model_name") or get_default_transcription_model_name()
+            )
             raw_language = params.get("language")
-            language = Language(
-                raw_language) if raw_language else config.default_language
+            language = (
+                Language(raw_language) if raw_language else config.default_language
+            )
             asr_options = params.get("asr_options")
             task = params.get("task", "transcribe")
 
             logger.info(
-                f"Job {job_id}: transcribing {filename} with model: {model_name}, "
-                f"options: {asr_options}, language: {language}, task: {task}, "
-                f"stage_backends: {selected_backends}"
+                "Job %s: transcribing %s with model: %s, options: %s, language: %s, task: %s, stage_backends: %s",
+                job_id,
+                filename,
+                model_name,
+                asr_options,
+                language,
+                task,
+                selected_backends,
             )
 
             await _progress("transcribe")
@@ -168,7 +185,8 @@ async def process_job(
             )
             profile["transcribe"] = time.perf_counter() - t0
             logger.info(
-                f"Job {job_id}: transcription took {profile['transcribe']:.2f} seconds")
+                "Job %s: transcription took %.2f seconds", job_id, profile["transcribe"]
+            )
 
             if align or diarize:
                 if alignment_backend is None:
@@ -182,7 +200,8 @@ async def process_job(
                 )
                 profile["align"] = time.perf_counter() - t0
                 logger.debug(
-                    f"Job {job_id}: alignment took {profile['align']:.2f} seconds")
+                    "Job %s: alignment took %.2f seconds", job_id, profile["align"]
+                )
 
             if diarize:
                 await _progress("diarize")
@@ -195,7 +214,8 @@ async def process_job(
                 )
                 profile["diarize"] = time.perf_counter() - t0
                 logger.debug(
-                    f"Job {job_id}: diarization took {profile['diarize']:.2f} seconds")
+                    "Job %s: diarization took %.2f seconds", job_id, profile["diarize"]
+                )
 
             await _progress("finalize")
             t0 = time.perf_counter()
@@ -203,11 +223,13 @@ async def process_job(
             profile["finalize"] = time.perf_counter() - t0
 
             total = time.perf_counter() - start_time
-            logger.info(f"Job {job_id}: transcription complete for {filename}")
+            logger.info("Job %s: transcription complete for %s", job_id, filename)
             logger.debug(
-                f"Job {job_id}: profile: total={total:.2f}s | "
-                + " | ".join(f"{k}={v:.2f}s" for k, v in profile.items())
-                + f" | (other={total - sum(profile.values()):.2f}s)"
+                "Job %s: profile: total=%.2fs | %s | (other=%.2fs)",
+                job_id,
+                total,
+                " | ".join(f"{k}={v:.2f}s" for k, v in profile.items()),
+                total - sum(profile.values()),
             )
             return result
         finally:
@@ -218,7 +240,7 @@ async def process_job(
         _close_timeline()
         if config.audio_cleanup and audio is not None:
             del audio
-            logger.info(f"Job {job_id}: audio data cleaned up")
+            logger.info("Job %s: audio data cleaned up", job_id)
         if config.cache_cleanup:
             _cleanup_cache_only()
-            logger.info(f"Job {job_id}: cache cleanup completed")
+            logger.info("Job %s: cache cleanup completed", job_id)

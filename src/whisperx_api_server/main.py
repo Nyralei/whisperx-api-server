@@ -338,6 +338,9 @@ def create_app() -> FastAPI:
         dependencies.append(ApiKeyDependency)
 
     app = FastAPI(lifespan=lifespan)
+    app.state.shutting_down = False
+    app.state.inflight = 0
+    app.state.drain_event = None
 
     # Observability router hosts unauthenticated /healthcheck (and /metrics when
     # METRICS_ENABLED=true — /metrics is registered directly on `app` below).

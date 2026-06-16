@@ -234,6 +234,27 @@ def _setup_kafka_instruments(registry: "CollectorRegistry") -> None:
         "Total requests rejected because the pending job queue was full",
         registry=registry,
     )
+    _kafka.late_reply_total = Counter(
+        "whisperx_kafka_late_reply_total",
+        "Replies for a locally-tracked job whose future was already gone "
+        "(timed out or reaped before the reply arrived)",
+        registry=registry,
+    )
+    _kafka.pending_reaped_total = Counter(
+        "whisperx_kafka_pending_reaped_total",
+        "Pending jobs reaped by the janitor because no worker reply arrived",
+        registry=registry,
+    )
+    _kafka.dlq_total = Counter(
+        "whisperx_kafka_dlq_total",
+        "Jobs routed to the dead-letter topic after exceeding max delivery attempts",
+        registry=registry,
+    )
+    _kafka.idempotent_skip_total = Counter(
+        "whisperx_kafka_idempotent_skip_total",
+        "Redelivered jobs whose cached result was resent without reprocessing",
+        registry=registry,
+    )
 
     import whisperx_api_server.kafka_client as kafka_client
 

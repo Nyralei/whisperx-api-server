@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from functools import lru_cache
 from typing import Annotated
 
@@ -72,7 +73,10 @@ async def verify_api_key(
 
     client_name = api_keys.get(credentials.credentials)
 
-    if credentials.credentials != config.api_key and client_name is None:
+    key_matches = config.api_key is not None and secrets.compare_digest(
+        credentials.credentials.encode("utf-8"), config.api_key.encode("utf-8")
+    )
+    if not key_matches and client_name is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key"
         )

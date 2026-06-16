@@ -55,6 +55,8 @@ docker compose -f compose-kafka.yaml --profile cpu-observe up
 
 > Workers process one job at a time per container. Scale horizontally by running multiple worker replicas.
 
+> Delivery is at-least-once. A worker writes each job's result envelope to S3 (`results/{job_id}`) before replying, so a redelivered job resends the stored reply instead of re-running. A job that repeatedly kills its worker is counted per delivery (`claims/{job_id}`) and, past `KAFKA__MAX_DELIVERY_ATTEMPTS` (default 3), routed to the `transcription-dlq` topic so the submitter fails fast instead of every worker dying on it. Both `results/` and `claims/` objects expire via the bucket lifecycle (`S3__OBJECT_EXPIRY_DAYS`, default 1 day).
+
 ### Profile matrix
 
 | # | Mode | Profile | Compose file |
@@ -82,7 +84,10 @@ All available settings are defined in [`config.py`](src/whisperx_api_server/conf
 | `HF_TOKEN` | — | Hugging Face token (required for pyannote diarization) |
 | `API_KEY` | — | Single API key for all requests |
 | `API_KEYS_FILE` | — | Path to JSON file mapping key → client name |
+| `AUTH_REQUIRED` | `false` | When `true`, refuse to start unless `API_KEY` or `API_KEYS_FILE` is set |
 | `MODE` | `direct` | `direct` or `kafka` |
+
+> **Auth is off by default.** With neither `API_KEY` nor `API_KEYS_FILE` set, the server accepts every request without credentials and logs a startup warning. Set either to enforce auth (missing header → 401, invalid key → 403), or set `AUTH_REQUIRED=true` to turn an unconfigured deployment into a startup failure rather than an open server.
 
 **Additional variables for Kafka mode:**
 
@@ -205,7 +210,7 @@ Terminal states (`completed` / `failed`) are retained for `REQUEST_STATUS__TTL_S
 - `400 Bad Request` — malformed `request_id` (must match `[A-Za-z0-9._-]{1,128}`)
 - `404 Not Found` — id is unknown, never received by this replica, or evicted
 
-> The tracker lives in-process. With multiple API replicas behind a load balancer, status is visible only on the replica that handled the POST. Plan ID-aware client routing (sticky sessions) if you scale out.
+> The transcription request/reply path scales across API replicas — each reply is delivered to every replica and only the one holding the job resolves it, so any replica can serve the POST. The status tracker, however, still lives in-process: with multiple replicas behind a load balancer, `/status` is visible only on the replica that handled the POST. Use ID-aware client routing (sticky sessions) for status polling if you scale out; cross-replica status is not yet implemented.
 
 ---
 

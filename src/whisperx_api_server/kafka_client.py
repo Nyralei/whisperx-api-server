@@ -18,6 +18,7 @@ _producer = None
 _admin = None  # AIOKafkaAdminClient singleton, lives for the process lifetime
 _config: KafkaConfig | None = None
 _pending_jobs: dict[str, tuple[asyncio.Future, float]] = {}
+_janitor_task: asyncio.Task | None = None
 
 _discovery_cache: tuple[float, dict] | None = None
 _discovery_lock: asyncio.Lock | None = None
@@ -187,23 +188,30 @@ async def _ensure_topics(cfg: KafkaConfig) -> None:
             num_partitions=cfg.topic_partitions,
             replication_factor=cfg.topic_replication_factor,
         ),
+        NewTopic(
+            name=cfg.dead_letter_topic,
+            num_partitions=1,
+            replication_factor=cfg.topic_replication_factor,
+        ),
     ]
     try:
         await _admin.create_topics(topics)
         logger.info(
-            "Kafka topics ensured: %s, %s, %s (partitions=%d, rf=%d)",
+            "Kafka topics ensured: %s, %s, %s, %s (partitions=%d, rf=%d)",
             cfg.request_topic,
             cfg.reply_topic,
             cfg.progress_topic,
+            cfg.dead_letter_topic,
             cfg.topic_partitions,
             cfg.topic_replication_factor,
         )
     except TopicAlreadyExistsError:
         logger.info(
-            "Kafka topics already exist: %s, %s, %s",
+            "Kafka topics already exist: %s, %s, %s, %s",
             cfg.request_topic,
             cfg.reply_topic,
             cfg.progress_topic,
+            cfg.dead_letter_topic,
         )
     except Exception:
         # Non-fatal: if topic creation fails (e.g. permissions) the broker's
@@ -213,7 +221,7 @@ async def _ensure_topics(cfg: KafkaConfig) -> None:
 
 
 async def start(cfg: KafkaConfig) -> None:
-    global _producer, _admin, _config, _discovery_lock
+    global _producer, _admin, _config, _discovery_lock, _janitor_task
     from aiokafka import AIOKafkaProducer
     from aiokafka.admin import AIOKafkaAdminClient
 
@@ -233,9 +241,21 @@ async def start(cfg: KafkaConfig) -> None:
     await _producer.start()
     logger.info("Kafka producer started (brokers: %s)", cfg.bootstrap_servers)
 
+    _janitor_task = asyncio.create_task(
+        _pending_janitor_loop(cfg), name="kafka-pending-janitor"
+    )
+
 
 async def stop() -> None:
-    global _producer, _admin, _discovery_cache, _discovery_lock
+    global _producer, _admin, _discovery_cache, _discovery_lock, _janitor_task
+    if _janitor_task is not None:
+        _janitor_task.cancel()
+        try:
+            await _janitor_task
+        except asyncio.CancelledError:
+            pass
+        _janitor_task = None
+        logger.info("Kafka pending-jobs janitor stopped")
     if _admin is not None:
         with contextlib.suppress(Exception):
             await _admin.close()
@@ -286,26 +306,104 @@ async def submit_job(
     return future
 
 
+def _reap_stale_pending(cfg: KafkaConfig, now: float | None = None) -> int:
+    """Drop pending jobs whose reply never arrived; return the count reaped.
+
+    The +60s margin past reply_timeout_seconds means this never races a live
+    awaiter (which pops its own entry on timeout). It only catches entries with
+    no awaiter (async submits) or genuine leaks.
+    """
+    cutoff = (now if now is not None else time.monotonic()) - (
+        cfg.reply_timeout_seconds + 60.0
+    )
+    stale = [job_id for job_id, (_, ts) in _pending_jobs.items() if ts < cutoff]
+    for job_id in stale:
+        entry = _pending_jobs.pop(job_id, None)
+        if entry is None:
+            continue
+        future, _ = entry
+        msg = f"Job {job_id} reaped: no worker reply received in time"
+        if future is not None and not future.done():
+            future.set_exception(TimeoutError(msg))
+        request_status.mark_failed(job_id, msg, "TimeoutError")
+        _kafka.pending_reaped_total.inc()
+    if stale:
+        _kafka.pending_jobs.set(len(_pending_jobs))
+    return len(stale)
+
+
+async def _pending_janitor_loop(cfg: KafkaConfig) -> None:
+    try:
+        while True:
+            await asyncio.sleep(60.0)
+            try:
+                n = _reap_stale_pending(cfg)
+                if n:
+                    logger.warning("Reaped %d pending job(s) with no worker reply", n)
+            except Exception:
+                logger.exception("Pending-jobs janitor sweep failed")
+    except asyncio.CancelledError:
+        raise
+
+
+def _handle_reply_event(event: dict[str, Any]) -> None:
+    """Resolve the pending future for a single decoded reply event."""
+    job_id = event.get("job_id")
+    if not job_id:
+        return
+
+    # Timeline first so a trailing mark_completed runs against finalized stages.
+    timeline = event.get("timeline")
+    if timeline:
+        request_status.apply_worker_timeline(job_id, timeline)
+
+    entry = _pending_jobs.pop(job_id, None)
+    _kafka.pending_jobs.set(len(_pending_jobs))
+    if entry is not None:
+        future, submit_time = entry
+        if not future.done():
+            duration = time.monotonic() - submit_time
+            if event.get("status") == "ok":
+                future.set_result(event["result"])
+                _kafka.job_duration.labels(status="ok").observe(duration)
+                logger.debug("Job %s: resolved from reply", job_id)
+            else:
+                future.set_exception(
+                    _rehydrate_worker_error(
+                        event.get("error_type"),
+                        event.get("error", "worker error"),
+                    )
+                )
+                _kafka.job_duration.labels(status="error").observe(duration)
+                logger.warning(
+                    "Job %s: failed with error: %s", job_id, event.get("error")
+                )
+    elif request_status.get(job_id) is not None:
+        # Tracked locally but the future is gone (timed out / reaped). Replies
+        # for jobs submitted by other replicas have no entry and are ignored.
+        _kafka.late_reply_total.inc()
+        logger.warning("Job %s: reply arrived after the future was gone", job_id)
+
+
 async def reply_consumer_loop(cfg: KafkaConfig) -> None:
     from aiokafka import AIOKafkaConsumer
 
-    consumer_kwargs: dict[str, Any] = dict(
+    # Unique group per replica so the broker fans every reply out to all of
+    # them; the holder of the future resolves it, the rest no-op.
+    group_id = f"{cfg.reply_group_id}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    consumer = AIOKafkaConsumer(
+        cfg.reply_topic,
         bootstrap_servers=cfg.bootstrap_servers,
-        group_id=cfg.reply_group_id,
+        group_id=group_id,
         auto_offset_reset="latest",
-        enable_auto_commit=False,
+        enable_auto_commit=True,
         fetch_max_bytes=cfg.max_message_bytes,
         max_partition_fetch_bytes=cfg.max_message_bytes,
     )
-    if cfg.reply_group_instance_id:
-        consumer_kwargs["group_instance_id"] = cfg.reply_group_instance_id
-
-    consumer = AIOKafkaConsumer(cfg.reply_topic, **consumer_kwargs)
     await consumer.start()
     logger.info(
-        "Kafka reply consumer started (group: %s, instance: %s, topic: %s)",
-        cfg.reply_group_id,
-        cfg.reply_group_instance_id or "<dynamic>",
+        "Kafka reply consumer started (group: %s, topic: %s)",
+        group_id,
         cfg.reply_topic,
     )
     try:
@@ -314,51 +412,8 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
                 event = json.loads(msg.value)
             except Exception:
                 logger.warning("Reply consumer: failed to parse message, skipping")
-                await consumer.commit()
                 continue
-
-            job_id = event.get("job_id")
-            if job_id:
-                # Apply the worker's authoritative per-stage timeline before
-                # resolving the future. mark_completed (called from
-                # transcribe_via_kafka after the future resolves) then runs
-                # against an already-finalized stages array, so worker.finalize
-                # and any other late stages are guaranteed to appear regardless
-                # of progress-topic delivery order.
-                timeline = event.get("timeline")
-                if timeline:
-                    request_status.apply_worker_timeline(job_id, timeline)
-
-                entry = _pending_jobs.pop(job_id, None)
-                _kafka.pending_jobs.set(len(_pending_jobs))
-                if entry is not None:
-                    future, submit_time = entry
-                    if not future.done():
-                        duration = time.monotonic() - submit_time
-                        if event.get("status") == "ok":
-                            future.set_result(event["result"])
-                            _kafka.job_duration.labels(status="ok").observe(duration)
-                            logger.debug("Job %s: resolved from reply", job_id)
-                        else:
-                            future.set_exception(
-                                _rehydrate_worker_error(
-                                    event.get("error_type"),
-                                    event.get("error", "worker error"),
-                                )
-                            )
-                            _kafka.job_duration.labels(status="error").observe(duration)
-                            logger.warning(
-                                "Job %s: failed with error: %s",
-                                job_id,
-                                event.get("error"),
-                            )
-
-            try:
-                await consumer.commit()
-            except Exception:
-                logger.exception(
-                    "Reply consumer: failed to commit offset for job %s", job_id
-                )
+            _handle_reply_event(event)
     finally:
         await consumer.stop()
         logger.info("Kafka reply consumer stopped")

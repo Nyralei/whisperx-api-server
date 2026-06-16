@@ -333,9 +333,22 @@ def create_app() -> FastAPI:
 
     logger.debug("Config: %s", config)
 
+    auth_configured = config.api_key is not None or config.api_keys_file is not None
+    if config.auth_required and not auth_configured:
+        raise RuntimeError(
+            "AUTH_REQUIRED is set but neither API_KEY nor API_KEYS_FILE is "
+            "configured — refusing to start an open server"
+        )
+
     dependencies = []
-    if config.api_key is not None or config.api_keys_file is not None:
+    if auth_configured:
         dependencies.append(ApiKeyDependency)
+    else:
+        logger.warning(
+            "Authentication is DISABLED — no API_KEY or API_KEYS_FILE set; all "
+            "requests are accepted without credentials. Set AUTH_REQUIRED=true to "
+            "fail startup instead."
+        )
 
     app = FastAPI(lifespan=lifespan)
     app.state.shutting_down = False

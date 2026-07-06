@@ -82,6 +82,20 @@ def init_concurrency() -> None:
     _decode_semaphore = asyncio.Semaphore(d) if d > 0 else None
 
 
+def log_concurrency_notes() -> None:
+    """Warn that raising the inference limit doesn't parallelize one model."""
+    n = get_config().max_concurrent_transcriptions
+    if n > 1:
+        logger.warning(
+            "max_concurrent_transcriptions=%d, but each transcription pipeline "
+            "holds a per-model lock during inference: requests for the SAME model "
+            "still run one at a time. The limit parallelizes across DISTINCT "
+            "models (and the align/diarize stages); raise same-model throughput "
+            "with more GPUs or replicas/workers.",
+            n,
+        )
+
+
 def _get_concurrency_semaphore() -> asyncio.Semaphore | None:
     return _concurrency_semaphore
 
@@ -145,10 +159,12 @@ async def _run_ffmpeg_decode(
             pass  # ffmpeg died early; stderr reader will surface the real reason
         finally:
             try:
-                proc.stdin.close()
+                if proc.stdin is not None:
+                    proc.stdin.close()
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+    assert proc.stdout is not None and proc.stderr is not None  # both opened as PIPE
     try:
         _, pcm, err = await asyncio.gather(
             _pump_stdin(),
@@ -320,6 +336,7 @@ async def transcribe(
     else:
         from whisperx_api_server import url_fetch
 
+        assert source_url is not None  # exactly one of audio_file/source_url
         source_label = url_fetch.filename_from_url(source_url)
 
     stage_name = "url_download" if source_url is not None else "upload_save"
@@ -339,6 +356,7 @@ async def transcribe(
                 allowed_hosts=config.url_fetch_allowed_hosts,
             )
         else:
+            assert audio_file is not None  # exactly one of audio_file/source_url
             file_path = await _save_upload_to_temp(audio_file, request_id)
         profile[stage_name] = time.perf_counter() - t0
         logger.info(
@@ -532,16 +550,23 @@ class QueueFullError(Exception):
     pass
 
 
-async def transcribe_via_kafka(
-    audio_file: UploadFile | None = None,
-    *,
+async def _submit_kafka_job(
+    audio_file: UploadFile | None,
+    source_url: str | None,
     params: dict[str, Any],
     request_id: str,
-    source_url: str | None = None,
-) -> dict[str, Any]:
+    *,
+    track_future: bool,
+    callback_url: str | None = None,
+) -> asyncio.Future | None:
+    """Upload (or forward the URL), publish the request, and announce the job.
+
+    Shared by the synchronous (track_future=True) and async (False) Kafka paths.
+    Returns the reply future when tracked, else None.
+    """
     if bool(audio_file) == bool(source_url):
         raise ValueError(
-            "transcribe_via_kafka requires exactly one of audio_file or source_url"
+            "Kafka submission requires exactly one of audio_file or source_url"
         )
     config = get_config()
     max_pending = config.kafka.max_pending_jobs
@@ -563,6 +588,7 @@ async def transcribe_via_kafka(
             request_id,
         )
     else:
+        assert audio_file is not None  # exactly one of audio_file/source_url
         safe_name = _safe_filename(audio_file.filename)
         request_status.set_stage(request_id, "uploading_to_s3")
         logger.info("Request ID: %s - Uploading audio to S3", request_id)
@@ -583,13 +609,69 @@ async def transcribe_via_kafka(
     )
     try:
         future = await kafka_client.submit_job(
-            request_id, s3_key, source_url, safe_name, params
+            request_id,
+            s3_key,
+            source_url,
+            safe_name,
+            params,
+            track_future=track_future,
+            callback_url=callback_url,
         )
     except Exception as e:
         request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise
 
+    # Announce the job so replicas that didn't handle this POST can serve /status.
+    local_state = request_status.get(request_id)
+    await kafka_client.publish_submitted(
+        config.kafka,
+        request_id,
+        filename=(local_state or {}).get("filename", safe_name),
+        params=(local_state or {}).get("params"),
+    )
     request_status.set_stage(request_id, "awaiting_worker")
+    return future
+
+
+async def submit_kafka_job(
+    audio_file: UploadFile | None = None,
+    *,
+    params: dict[str, Any],
+    request_id: str,
+    source_url: str | None = None,
+    callback_url: str | None = None,
+) -> None:
+    """Submit a job and return without waiting for the reply (async API). The
+    terminal envelope is durable in S3 (results/{job_id}); the caller polls
+    /status and fetches the outcome from /result."""
+    await _submit_kafka_job(
+        audio_file,
+        source_url,
+        params,
+        request_id,
+        track_future=False,
+        callback_url=callback_url,
+    )
+
+
+async def transcribe_via_kafka(
+    audio_file: UploadFile | None = None,
+    *,
+    params: dict[str, Any],
+    request_id: str,
+    source_url: str | None = None,
+    callback_url: str | None = None,
+) -> dict[str, Any]:
+    config = get_config()
+    future = await _submit_kafka_job(
+        audio_file,
+        source_url,
+        params,
+        request_id,
+        track_future=True,
+        callback_url=callback_url,
+    )
+    assert future is not None  # track_future=True always registers a future
     try:
         result = await asyncio.wait_for(
             future, timeout=config.kafka.reply_timeout_seconds

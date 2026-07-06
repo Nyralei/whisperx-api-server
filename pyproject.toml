@@ -14,6 +14,10 @@ dependencies = [
     "python-multipart>=0.0.20",
 ]
 
+[project.scripts]
+whisperx-api = "whisperx_api_server.main:start"
+whisperx-worker = "whisperx_worker.main:main"
+
 [project.optional-dependencies]
 cpu = [
     "whisperx~=3.8.6",
@@ -52,8 +56,8 @@ requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["whisperx_api_server*"]
+where = ["src"]
+include = ["whisperx_api_server*", "whisperx_worker*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -68,6 +72,11 @@ include = ["src", "tests"]
 extraPaths = ["src", "tests"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+# The type-check env is intentionally torch-free and omits optional extras (ML,
+# GPU, kafka-python protocol stubs), so unresolved imports here are expected, not
+# mistakes — runtime guards and ruff's F-rules cover real typos.
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
 
 [tool.ruff]
 target-version = "py310"

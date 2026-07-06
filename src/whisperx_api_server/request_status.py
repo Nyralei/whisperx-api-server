@@ -104,10 +104,55 @@ def start(
         "stages": [],
         "error": None,
         "error_type": None,
+        # This replica submitted the job (vs. a stub built from progress events).
+        "local": True,
     }
     with _lock:
         _states[request_id] = state
         _enforce_capacity_locked(cfg.max_entries)
+
+
+def ensure_tracked(
+    request_id: str,
+    *,
+    mode: str = "kafka",
+    filename: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> None:
+    """Create a non-local stub for a job first seen over the progress topic.
+
+    Lets a replica that did not submit the job converge its status view from
+    progress events. Idempotent; never overwrites a local entry, and fills in
+    metadata learned late (e.g. a `submitted` event arriving after a stage one).
+    """
+    if not request_id:
+        return
+    cfg = get_config().request_status
+    now = _now()
+    with _lock:
+        state = _states.get(request_id)
+        if state is None:
+            _states[request_id] = {
+                "request_id": request_id,
+                "status": _STATUS_QUEUED,
+                "mode": mode,
+                "stage": _STATUS_QUEUED,
+                "submitted_at": now,
+                "updated_at": now,
+                "completed_at": None,
+                "filename": filename,
+                "params": params,
+                "stages": [],
+                "error": None,
+                "error_type": None,
+                "local": False,
+            }
+            _enforce_capacity_locked(cfg.max_entries)
+            return
+        if filename is not None and not state.get("filename"):
+            state["filename"] = filename
+        if params is not None and not state.get("params"):
+            state["params"] = params
 
 
 def set_stage(request_id: str, stage: str) -> None:

@@ -51,6 +51,12 @@ x-worker-cuda-base: &worker-cuda-base
     dockerfile: Dockerfile.worker-cuda
   env_file:
     - .env
+  # On stop / rolling update the worker drains its in-flight job (finish → reply →
+  # commit) before exiting. Give it more than Docker's 10s default so a job isn't
+  # SIGKILLed mid-flight; raise this to your worst-case job duration. A job that
+  # outlives the grace period is killed uncommitted and safely redelivered
+  # (idempotent resend from S3), at the cost of one reprocess.
+  stop_grace_period: 120s
   depends_on:
     kafka:
       condition: service_healthy
@@ -83,6 +89,9 @@ x-worker-cpu-base: &worker-cpu-base
     dockerfile: Dockerfile.worker-cpu
   env_file:
     - .env
+  # See the CUDA worker note above: drains the in-flight job before exit; raise to
+  # your worst-case job duration or accept one redelivered reprocess past it.
+  stop_grace_period: 120s
   depends_on:
     kafka:
       condition: service_healthy

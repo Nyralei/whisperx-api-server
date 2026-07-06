@@ -195,9 +195,11 @@ async def lifespan(app: FastAPI):
             )
 
     from whisperx_api_server.executors import shutdown_executors
-    from whisperx_api_server.transcriber import init_concurrency
+    from whisperx_api_server.transcriber import init_concurrency, log_concurrency_notes
 
     init_concurrency()
+    if config.mode != DistributedMode.KAFKA:
+        log_concurrency_notes()
 
     def _on_status_cleanup_done(task: asyncio.Task) -> None:
         if not task.cancelled() and task.exception() is not None:
@@ -333,9 +335,22 @@ def create_app() -> FastAPI:
 
     logger.debug("Config: %s", config)
 
+    auth_configured = config.api_key is not None or config.api_keys_file is not None
+    if config.auth_required and not auth_configured:
+        raise RuntimeError(
+            "AUTH_REQUIRED is set but neither API_KEY nor API_KEYS_FILE is "
+            "configured — refusing to start an open server"
+        )
+
     dependencies = []
-    if config.api_key is not None or config.api_keys_file is not None:
+    if auth_configured:
         dependencies.append(ApiKeyDependency)
+    else:
+        logger.warning(
+            "Authentication is DISABLED — no API_KEY or API_KEYS_FILE set; all "
+            "requests are accepted without credentials. Set AUTH_REQUIRED=true to "
+            "fail startup instead."
+        )
 
     app = FastAPI(lifespan=lifespan)
     app.state.shutting_down = False
@@ -364,8 +379,10 @@ def create_app() -> FastAPI:
 
         @app.get("/metrics", include_in_schema=False)
         def metrics_endpoint() -> FastAPIResponse:
+            registry = get_registry()
+            assert registry is not None  # metrics enabled ⇒ setup_metrics() ran
             return FastAPIResponse(
-                content=generate_latest(get_registry()),
+                content=generate_latest(registry),
                 media_type=CONTENT_TYPE_LATEST,
             )
 
@@ -400,3 +417,15 @@ def create_app() -> FastAPI:
     app.add_middleware(GracefulShutdownMiddleware, app_state=app.state)
 
     return app
+
+
+def start() -> None:
+    import uvicorn
+
+    config = get_config()
+    uvicorn.run(
+        "whisperx_api_server.main:create_app",
+        factory=True,
+        host=config.host,
+        port=config.port,
+    )

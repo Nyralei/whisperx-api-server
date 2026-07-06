@@ -170,15 +170,15 @@ class WhisperConfig(BaseModel):
     num_workers: int = Field(default=1)
     vad_method: VadMethod = Field(default=VadMethod.PYANNOTE)
     # Custom VAD model instance to assign directly. If set, vad_method is ignored.
-    vad_model: str = Field(default=None)
+    vad_model: str | None = Field(default=None)
     # Overrides for VAD defaults: chunk_size (s), vad_onset (0.0–1.0), vad_offset (0.0–1.0).
     # Defaults: {"chunk_size": 30, "vad_onset": 0.500, "vad_offset": 0.363}
     # Example: WHISPER__VAD_OPTIONS='{"vad_onset": 0.4, "vad_offset": 0.3}'
-    vad_options: dict = Field(default=None)
+    vad_options: dict | None = Field(default=None)
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
     local_files_only: bool = Field(default=False)
-    download_root: str = Field(default=None)
+    download_root: str | None = Field(default=None)
     batch_size: int = Field(default=12)
     chunk_size: int = Field(default=30)
 
@@ -196,7 +196,7 @@ class AlignConfig(BaseModel):
     whitelist: list = Field(default_factory=list)
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
-    preload_model_name: str = Field(default=None)
+    preload_model_name: str | None = Field(default=None)
     local_files_only: bool = Field(default=False)
     # Download NLTK punkt_tab tokenizer at startup so the first alignment request
     # does not block an executor thread on a network call.
@@ -225,12 +225,11 @@ class KafkaConfig(BaseModel):
     request_topic: str = Field(default="transcription-requests")
     reply_topic: str = Field(default="transcription-replies")
     consumer_group_worker: str = Field(default="whisperx-worker")
-    # Stable group id for the API-side reply consumer. Replicas of the API
-    # share this group so each reply is delivered exactly once. When running
-    # multiple replicas, each replica MUST set a unique `reply_group_instance_id`
-    # (Kafka static membership) to avoid rebalance churn on restart.
+    # Prefix for the API-side reply consumer group. Each replica derives a
+    # unique group id (prefix + pid + rand), so the broker fans every reply out
+    # to all replicas; only the replica holding the job's future resolves it and
+    # the rest no-op. Mirrors the progress-consumer fan-out below.
     reply_group_id: str = Field(default="whisperx-api-reply")
-    reply_group_instance_id: str | None = Field(default=None)
     reply_timeout_seconds: float = Field(default=3600.0)
     max_poll_interval_ms: int = Field(default=600_000)
     # Maximum number of jobs waiting for a reply (0 = unlimited).
@@ -254,6 +253,11 @@ class KafkaConfig(BaseModel):
     # request_id is locally tracked. Failures to publish are non-fatal.
     progress_topic: str = Field(default="transcription-progress")
     progress_group_id_prefix: str = Field(default="whisperx-api-progress")
+    # A job that is delivered more than this many times (tracked per job via a
+    # claims/{job_id} counter in S3) is routed to the dead-letter topic instead
+    # of being redelivered forever — the guard against a worker-killing poison job.
+    max_delivery_attempts: int = Field(default=3, gt=0)
+    dead_letter_topic: str = Field(default="transcription-dlq")
 
 
 class S3Config(BaseModel):
@@ -313,6 +317,10 @@ class Config(BaseSettings):
 
     api_keys_file: str | None = None
 
+    # When true, refuse to start unless API_KEY or API_KEYS_FILE is configured.
+    # The production safety valve against accidentally shipping an open server.
+    auth_required: bool = Field(default=False)
+
     log_level: str = "INFO"
 
     host: str = Field(alias="UVICORN_HOST", default="0.0.0.0")
@@ -363,6 +371,11 @@ class Config(BaseSettings):
     # url_fetch_allowed_hosts for an explicit hostname allowlist.
     url_fetch_allow_private_hosts: bool = Field(default=False)
     url_fetch_allowed_hosts: list[str] = Field(default_factory=list)
+
+    # Total ceiling for a completion-webhook POST (callback_url), in seconds.
+    # Kept short: the callback carries the result envelope, not bulk audio. The
+    # SSRF policy and connect timeout are shared with the url_fetch settings above.
+    webhook_timeout_seconds: float = Field(default=15.0, gt=0)
 
     # On SIGTERM, refuse new requests with HTTP 503 and wait up to this many
     # seconds for in-flight work to drain before tearing down. Best-effort on

@@ -34,14 +34,15 @@ async def init_client(cfg: S3Config) -> None:
             read_timeout=120,
         ),
     )
-    _client = await ctx.__aenter__()
+    client: S3Client = await ctx.__aenter__()
+    _client = client
     logger.info(
         "S3 client initialized (endpoint: %s, bucket: %s)", cfg.endpoint_url, cfg.bucket
     )
 
     try:
         try:
-            await _client.head_bucket(Bucket=cfg.bucket)
+            await client.head_bucket(Bucket=cfg.bucket)
         except Exception as exc:
             from botocore.exceptions import ClientError
 
@@ -49,11 +50,11 @@ async def init_client(cfg: S3Config) -> None:
                 "Code"
             ] not in ("404", "NoSuchBucket"):
                 raise
-            await _client.create_bucket(Bucket=cfg.bucket)
+            await client.create_bucket(Bucket=cfg.bucket)
             logger.info("Created S3 bucket: %s", cfg.bucket)
 
         if cfg.manage_lifecycle and cfg.object_expiry_days > 0:
-            await _client.put_bucket_lifecycle_configuration(
+            await client.put_bucket_lifecycle_configuration(
                 Bucket=cfg.bucket,
                 LifecycleConfiguration={
                     "Rules": [
@@ -138,3 +139,76 @@ async def delete_audio(key: str) -> None:
         raise RuntimeError("S3 client not initialized")
     await _client.delete_object(Bucket=_config.bucket, Key=key)
     logger.debug("Deleted s3://%s/%s", _config.bucket, key)
+
+
+_RESULTS_PREFIX = "results/"
+_CLAIMS_PREFIX = "claims/"
+
+
+def _is_not_found(exc: Exception) -> bool:
+    from botocore.exceptions import ClientError
+
+    if not isinstance(exc, ClientError):
+        return False
+    return exc.response.get("Error", {}).get("Code") in (
+        "404",
+        "NoSuchKey",
+        "NoSuchBucket",
+    )
+
+
+async def put_result(job_id: str, envelope: str) -> None:
+    """Store the terminal reply envelope so a redelivery can resend it."""
+    if _client is None or _config is None:
+        raise RuntimeError("S3 client not initialized")
+    await _client.put_object(
+        Bucket=_config.bucket,
+        Key=f"{_RESULTS_PREFIX}{job_id}",
+        Body=envelope.encode(),
+    )
+
+
+async def get_result(job_id: str) -> str | None:
+    """Return the stored reply envelope, or None if the job hasn't finished."""
+    if _client is None or _config is None:
+        raise RuntimeError("S3 client not initialized")
+    try:
+        response = await _client.get_object(
+            Bucket=_config.bucket, Key=f"{_RESULTS_PREFIX}{job_id}"
+        )
+    except Exception as exc:
+        if _is_not_found(exc):
+            return None
+        raise
+    async with response["Body"] as stream:
+        data = await stream.read()
+    return data.decode()
+
+
+async def increment_claim(job_id: str) -> int:
+    """Read-modify-write the per-job delivery counter; return the new count."""
+    if _client is None or _config is None:
+        raise RuntimeError("S3 client not initialized")
+    key = f"{_CLAIMS_PREFIX}{job_id}"
+    count = 0
+    try:
+        response = await _client.get_object(Bucket=_config.bucket, Key=key)
+    except Exception as exc:
+        if not _is_not_found(exc):
+            raise
+    else:
+        async with response["Body"] as stream:
+            data = await stream.read()
+        try:
+            count = int(data.decode().strip() or "0")
+        except ValueError:
+            count = 0
+    count += 1
+    await _client.put_object(Bucket=_config.bucket, Key=key, Body=str(count).encode())
+    return count
+
+
+async def delete_claim(job_id: str) -> None:
+    if _client is None or _config is None:
+        raise RuntimeError("S3 client not initialized")
+    await _client.delete_object(Bucket=_config.bucket, Key=f"{_CLAIMS_PREFIX}{job_id}")

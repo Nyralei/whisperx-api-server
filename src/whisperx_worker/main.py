@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
-import json
 import logging
+import os
 import signal
+import socket
 
 import whisperx_api_server.s3_client as s3_client
 from whisperx_api_server.backends.registry import (
@@ -13,9 +14,8 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
+from whisperx_worker.handler import WorkerContext, consume_loop
 from whisperx_worker.health_server import WorkerReadiness, start_health_server
-from whisperx_worker.processor import process_job, serialize_result
-from whisperx_worker.progress import publish_stage
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +66,18 @@ async def run_worker() -> None:
                 config.metrics.gpu_poll_interval,
             )
 
-        start_http_server(config.metrics.worker_port, registry=get_registry())
+        registry = get_registry()
+        assert registry is not None  # setup_metrics() ran above
+        start_http_server(config.metrics.worker_port, registry=registry)
         logger.info(
             "Worker /metrics server started on port %s",
             config.metrics.worker_port,
         )
 
-    from whisperx_api_server.transcriber import init_concurrency
+    from whisperx_api_server.transcriber import init_concurrency, log_concurrency_notes
 
     init_concurrency()
+    log_concurrency_notes()
 
     shutdown_event = asyncio.Event()
 
@@ -179,117 +182,20 @@ async def run_worker() -> None:
         config.kafka.bootstrap_servers,
     )
 
+    worker_id = f"{socket.gethostname()}-{os.getpid()}"
+
+    async def _commit() -> None:
+        await consumer.commit()
+
+    ctx = WorkerContext(
+        producer=producer,
+        config=config,
+        commit=_commit,
+        worker_id=worker_id,
+    )
+
     try:
-        while not shutdown_event.is_set():
-            # Poll with a bounded timeout so SIGTERM during idle periods
-            # exits the loop within ~1s.
-            records = await consumer.getmany(timeout_ms=1000, max_records=1)
-            if not records:
-                continue
-
-            messages = [m for msgs in records.values() for m in msgs]
-            for msg in messages:
-                try:
-                    event = json.loads(msg.value)
-                except Exception:
-                    preview = msg.value[:200] if msg.value else b""
-                    logger.error(
-                        "Failed to parse Kafka message (offset=%s, partition=%s), skipping. "
-                        "Raw value preview: %r",
-                        msg.offset,
-                        msg.partition,
-                        preview,
-                    )
-                    await consumer.commit()
-                    continue
-
-                job_id = event.get("job_id", "<unknown>")
-                logger.info("Job %s: received", job_id)
-
-                # Pause consumer — process one job at a time. `job_in_flight` is set
-                # before pause so the rebalance listener re-applies it if assignments
-                # change while this job runs.
-                job_in_flight[0] = True
-                consumer.pause(*consumer.assignment())
-
-                try:
-                    reply: dict = {"job_id": job_id}
-                    timeline: dict[str, dict[str, float]] = {}
-                    try:
-                        result = await process_job(
-                            event,
-                            progress_producer=producer,
-                            progress_topic=config.kafka.progress_topic,
-                            timeline_out=timeline,
-                        )
-                        reply["status"] = "ok"
-                        reply["result"] = result
-                    except Exception as exc:
-                        logger.exception("Job %s: failed", job_id)
-                        reply["status"] = "error"
-                        reply["error"] = str(exc)
-                        # Pass exception type so the API can rehydrate typed
-                        # exceptions (e.g. InvalidAudioError → HTTP 422) instead
-                        # of collapsing every worker failure to RuntimeError/500.
-                        reply["error_type"] = type(exc).__name__
-                    # Authoritative per-stage timeline (wall-clock from worker pod).
-                    # Always include — even on failure — so the API has the partial
-                    # progress history when the job didn't complete.
-                    if timeline:
-                        reply["timeline"] = timeline
-
-                    # Best-effort terminal progress event (the API tracker
-                    # also calls mark_completed/mark_failed off the reply
-                    # path, so this is just an early signal — failures here
-                    # never affect the reply publish below).
-                    if reply["status"] == "ok":
-                        await publish_stage(
-                            producer,
-                            config.kafka.progress_topic,
-                            job_id,
-                            "completed",
-                            status="completed",
-                        )
-                    else:
-                        await publish_stage(
-                            producer,
-                            config.kafka.progress_topic,
-                            job_id,
-                            "failed",
-                            status="failed",
-                            error=reply.get("error"),
-                            error_type=reply.get("error_type"),
-                        )
-
-                    # Publish reply before committing offset
-                    await producer.send_and_wait(
-                        config.kafka.reply_topic,
-                        key=job_id.encode(),
-                        value=serialize_result(reply).encode(),
-                    )
-                    logger.info(
-                        "Job %s: reply published to %s",
-                        job_id,
-                        config.kafka.reply_topic,
-                    )
-
-                    s3_key = event.get("s3_key")
-                    if config.s3.delete_after_download and s3_key:
-                        try:
-                            await s3_client.delete_audio(s3_key)
-                        except Exception:
-                            logger.warning(
-                                "Job %s: failed to delete S3 object %r", job_id, s3_key
-                            )
-
-                    await consumer.commit()
-                finally:
-                    job_in_flight[0] = False
-                    consumer.resume(*consumer.assignment())
-                    logger.info("Job %s: done, consumer resumed", job_id)
-
-        logger.info("Worker shutdown requested, exiting message loop")
-
+        await consume_loop(consumer, ctx, shutdown_event, job_in_flight)
     finally:
         if sigterm_registered:
             with contextlib.suppress(NotImplementedError, RuntimeError):
@@ -307,5 +213,9 @@ async def run_worker() -> None:
         logger.info("Worker shut down")
 
 
-if __name__ == "__main__":
+def main() -> None:
     asyncio.run(run_worker())
+
+
+if __name__ == "__main__":
+    main()

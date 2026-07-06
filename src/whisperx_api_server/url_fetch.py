@@ -78,7 +78,7 @@ async def _resolve_host(hostname: str) -> list[str]:
     infos = await asyncio.to_thread(
         socket.getaddrinfo, hostname, None, 0, socket.SOCK_STREAM
     )
-    return [info[4][0] for info in infos]
+    return [str(info[4][0]) for info in infos]
 
 
 async def validate_url_for_fetch(

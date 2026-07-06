@@ -22,7 +22,6 @@ import uuid
 
 import numpy as np
 import pytest
-from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 
 import whisperx_worker.handler as worker_handler
 import whisperx_worker.processor as processor
@@ -157,12 +156,16 @@ async def _fake_load_audio(audio_bytes, request_id, sample_rate=16000):
 
 
 async def _producer(cfg):
+    from aiokafka import AIOKafkaProducer
+
     p = AIOKafkaProducer(bootstrap_servers=cfg.kafka.bootstrap_servers)
     await p.start()
     return p
 
 
 async def _worker_consumer(cfg):
+    from aiokafka import AIOKafkaConsumer, TopicPartition
+
     c = AIOKafkaConsumer(
         bootstrap_servers=cfg.kafka.bootstrap_servers,
         group_id=cfg.kafka.consumer_group_worker,
@@ -185,6 +188,8 @@ async def _produce_job(producer, cfg, event):
 
 
 async def _drain_topic(cfg, topic, job_id, timeout=10.0):
+    from aiokafka import AIOKafkaConsumer
+
     c = AIOKafkaConsumer(
         topic,
         bootstrap_servers=cfg.kafka.bootstrap_servers,
@@ -424,6 +429,8 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
 
     monkeypatch.setattr(worker_handler, "handle_message", _spy_handle)
 
+    from aiokafka import AIOKafkaConsumer
+
     producer = await _producer(cfg)
     consumer = AIOKafkaConsumer(
         bootstrap_servers=cfg.kafka.bootstrap_servers,
@@ -461,6 +468,8 @@ async def test_reply_fanned_out_to_every_replica_group(worker_env):
     """1.2: the broker delivers each reply to every replica's unique group, so
     whichever replica holds the future is guaranteed to receive it."""
     cfg = worker_env
+    from aiokafka import AIOKafkaConsumer
+
     groups = [
         f"{cfg.kafka.reply_group_id}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         for _ in range(2)

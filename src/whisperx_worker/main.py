@@ -14,7 +14,7 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
-from whisperx_worker.handler import WorkerContext, consume_loop
+from whisperx_worker.handler import WorkerContext, commit_safely, consume_loop
 from whisperx_worker.health_server import WorkerReadiness, start_health_server
 
 logger = logging.getLogger(__name__)
@@ -185,7 +185,7 @@ async def run_worker() -> None:
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
 
     async def _commit() -> None:
-        await consumer.commit()
+        await commit_safely(consumer.commit)
 
     ctx = WorkerContext(
         producer=producer,

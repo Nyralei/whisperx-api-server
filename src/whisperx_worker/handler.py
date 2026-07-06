@@ -190,6 +190,27 @@ async def handle_message(event: dict, ctx: WorkerContext) -> None:
     await ctx.commit()
 
 
+_REBALANCE_COMMIT_ERRORS = frozenset({"CommitFailedError", "UnknownMemberIdError"})
+
+
+async def commit_safely(commit: Callable[[], Awaitable[None]]) -> None:
+    """Commit offsets, tolerating the group having rebalanced this consumer out.
+
+    The result is already durable in S3 and the reply already sent, so a commit
+    lost to a rebalance is recovered by idempotent redelivery — a crash is not.
+    Matched by class name to avoid importing aiokafka into this torch-free module.
+    """
+    try:
+        await commit()
+    except Exception as exc:
+        if type(exc).__name__ not in _REBALANCE_COMMIT_ERRORS:
+            raise
+        logger.warning(
+            "Offset commit skipped — consumer was rebalanced out of the group; "
+            "idempotent redelivery will re-commit"
+        )
+
+
 async def consume_loop(
     consumer: Any,
     ctx: WorkerContext,
@@ -214,7 +235,7 @@ async def consume_loop(
                     msg.offset,
                     msg.partition,
                 )
-                await consumer.commit()
+                await ctx.commit()
                 continue
             try:
                 event = json.loads(msg.value)
@@ -227,18 +248,24 @@ async def consume_loop(
                     msg.partition,
                     preview,
                 )
-                await consumer.commit()
+                await ctx.commit()
                 continue
 
             job_id = event.get("job_id", "<unknown>")
             logger.info("Job %s: received", job_id)
 
-            # Pause — process one job at a time. `job_in_flight` is set before the
-            # pause so the rebalance listener re-applies it if assignments change.
+            # One job at a time: pause every partition, then run the job as a task
+            # while this loop keeps polling. Each (empty) getmany resets aiokafka's
+            # fetcher-idle clock, so a job outlasting max_poll_interval_ms no longer
+            # evicts the worker from the group and kills it at its terminal commit.
+            # job_in_flight gates the rebalance listener's pause re-apply.
             job_in_flight[0] = True
             consumer.pause(*consumer.assignment())
+            task = asyncio.create_task(handle_message(event, ctx))
             try:
-                await handle_message(event, ctx)
+                while not task.done():
+                    await consumer.getmany(timeout_ms=1000, max_records=1)
+                await task
             finally:
                 job_in_flight[0] = False
                 consumer.resume(*consumer.assignment())

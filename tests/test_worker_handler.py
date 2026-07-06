@@ -1,5 +1,6 @@
 """Unit tests for the worker message handler (no broker, no S3)."""
 
+import asyncio
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -323,3 +324,98 @@ async def test_poison_job_routes_to_dlq_after_max_attempts(harness, monkeypatch)
     assert harness.s3.claims.get("poison") is None
     assert harness.commits == [True]
     assert harness.dlq.count == 1
+
+
+@dataclass
+class _Msg:
+    value: bytes
+    offset: int = 0
+    partition: int = 0
+
+
+class FakeConsumer:
+    """Minimal getmany/pause/resume stand-in for the run loop."""
+
+    def __init__(self, first_batch):
+        self._first = first_batch
+        self.getmany_calls = 0
+        self.pause_calls = 0
+        self.resume_calls = 0
+        self._assignment = {"tp-0"}
+
+    def assignment(self):
+        return set(self._assignment)
+
+    def pause(self, *partitions):
+        self.pause_calls += 1
+
+    def resume(self, *partitions):
+        self.resume_calls += 1
+
+    async def getmany(self, timeout_ms, max_records):
+        self.getmany_calls += 1
+        await asyncio.sleep(0)  # yield like a real broker poll
+        if self.getmany_calls == 1:
+            return self._first
+        return {}
+
+    async def commit(self):
+        await asyncio.sleep(0)
+
+
+async def test_consume_loop_keeps_polling_while_job_runs(harness, monkeypatch):
+    """A long job must not starve the poll loop: getmany has to keep firing while
+    handle_message runs, or aiokafka evicts the worker past max_poll_interval_ms."""
+    shutdown_event = asyncio.Event()
+    job_in_flight = [False]
+    polls_during: list[int] = []
+
+    async def _slow_handle(event, ctx):
+        start = consumer.getmany_calls
+        for _ in range(5):
+            await asyncio.sleep(0)
+        polls_during.append(consumer.getmany_calls - start)
+        shutdown_event.set()
+
+    monkeypatch.setattr(handler, "handle_message", _slow_handle)
+
+    msg = _Msg(json.dumps({"job_id": "live-1"}).encode())
+    consumer = FakeConsumer({"tp-0": [msg]})
+
+    await asyncio.wait_for(
+        handler.consume_loop(consumer, harness.ctx, shutdown_event, job_in_flight),
+        timeout=5,
+    )
+
+    assert polls_during and polls_during[0] >= 1  # polled during the in-flight job
+    assert consumer.pause_calls == 1
+    assert consumer.resume_calls == 1
+    assert job_in_flight == [False]
+
+
+async def test_commit_safely_swallows_rebalance_error():
+    class CommitFailedError(Exception):
+        pass
+
+    async def _rebalanced():
+        raise CommitFailedError("group already rebalanced")
+
+    await handler.commit_safely(_rebalanced)  # must not raise
+
+
+async def test_commit_safely_propagates_unrelated_error():
+    async def _boom():
+        raise ValueError("real bug")
+
+    with pytest.raises(ValueError):
+        await handler.commit_safely(_boom)
+
+
+async def test_commit_safely_commits_when_healthy():
+    calls: list = []
+
+    async def _ok():
+        calls.append(True)
+
+    await handler.commit_safely(_ok)
+    assert calls == [True]

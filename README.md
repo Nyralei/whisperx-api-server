@@ -53,7 +53,7 @@ docker compose -f compose-kafka.yaml --profile cuda-observe up
 docker compose -f compose-kafka.yaml --profile cpu-observe up
 ```
 
-> Workers process one job at a time per container. Scale horizontally by running multiple worker replicas.
+> Workers process one job at a time per container. Scale horizontally by running multiple worker replicas. On `SIGTERM` (stop / rolling update) a worker finishes its in-flight job — reply, then offset commit — before exiting, and refuses to start a new one. Set the container `stop_grace_period` to your worst-case job duration so a long job isn't killed mid-flight; a job killed before commit is safely redelivered (idempotent resend) at the cost of one reprocess.
 
 > Delivery is at-least-once. A worker writes each job's result envelope to S3 (`results/{job_id}`) before replying, so a redelivered job resends the stored reply instead of re-running. A job that repeatedly kills its worker is counted per delivery (`claims/{job_id}`) and, past `KAFKA__MAX_DELIVERY_ATTEMPTS` (default 3), routed to the `transcription-dlq` topic so the submitter fails fast instead of every worker dying on it. Both `results/` and `claims/` objects expire via the bucket lifecycle (`S3__OBJECT_EXPIRY_DAYS`, default 1 day).
 
@@ -86,6 +86,9 @@ All available settings are defined in [`config.py`](src/whisperx_api_server/conf
 | `API_KEYS_FILE` | — | Path to JSON file mapping key → client name |
 | `AUTH_REQUIRED` | `false` | When `true`, refuse to start unless `API_KEY` or `API_KEYS_FILE` is set |
 | `MODE` | `direct` | `direct` or `kafka` |
+| `MAX_CONCURRENT_TRANSCRIPTIONS` | `1` | Max concurrent ML inferences (transcribe / align / diarize). `0` = unlimited. See the concurrency note below. |
+
+> **`MAX_CONCURRENT_TRANSCRIPTIONS` parallelizes across *distinct* models, not within one.** Each transcription pipeline holds a per-model lock during the transcribe step, so two requests for the **same** model still run one at a time even with the limit raised — the setting lets a request for a *different* model (and the align / diarize stages) proceed concurrently. To raise same-model throughput, add GPUs or run more replicas / workers. Whichever process runs inference (the API in direct mode, the worker in Kafka mode) logs this caveat at startup when the limit is >1.
 
 > **Auth is off by default.** With neither `API_KEY` nor `API_KEYS_FILE` set, the server accepts every request without credentials and logs a startup warning. Set either to enforce auth (missing header → 401, invalid key → 403), or set `AUTH_REQUIRED=true` to turn an unconfigured deployment into a startup failure rather than an open server.
 
@@ -134,6 +137,7 @@ Transcribe an audio file. Compatible with the [OpenAI transcription API](https:/
 | `batch_size` | int | config default | Inference batch size |
 | `chunk_size` | int | config default | VAD chunk size in seconds |
 | `async` | bool | `false` | **Kafka mode only.** Return `202 Accepted` immediately instead of blocking; fetch the outcome later. See [Async job submission](#async-job-submission-kafka-mode). |
+| `callback_url` | string | — | Optional URL the result envelope is POSTed to when the job finishes. Validated against the same SSRF policy as `audio_url`. See [Completion webhook](#completion-webhook). |
 
 **Response formats**
 
@@ -263,6 +267,30 @@ Formatting is applied at fetch time from these query parameters — the `respons
 - worker failures are replayed with the same status code the synchronous endpoint returns (e.g. invalid audio → `422`, timeout → `504`), not `404`
 
 Results are retained for `S3__OBJECT_EXPIRY_DAYS` (default 1 day) via the bucket lifecycle policy; after that the id 404s.
+
+---
+
+### Completion webhook
+
+Add a `callback_url` form field to any transcription POST to have the result **pushed** to you when the job finishes, instead of (or alongside) polling. The URL is validated up front against the same SSRF policy as `audio_url` (`URL_FETCH_ALLOW_PRIVATE_HOSTS` / `URL_FETCH_ALLOWED_HOSTS`); a rejected host fails the request with `422` before any work starts.
+
+On completion the server sends a single `POST` to `callback_url` with the terminal envelope as the JSON body:
+
+```jsonc
+{
+  "job_id": "my-async-1",
+  "status": "ok",      // or "error"
+  "result": { },       // raw transcript (segments, language); absent on error
+  "error": "...",      // present only when status is "error"
+  "error_type": "..."
+}
+```
+
+Format the `result` yourself, or ignore the body and fetch `result_url` for a formatted response.
+
+- **Who delivers:** in **Kafka mode** the worker delivers — it is the single point that runs the job and holds the envelope, and it survives an API-replica restart. In **direct mode** the API delivers in-process after returning the synchronous response.
+- **Both outcomes notify (Kafka mode):** success, handled failures, and jobs retired to the dead-letter queue all fire the webhook with the matching envelope. Direct mode fires on success only — a direct-mode failure is already returned to the (synchronously waiting) caller as an HTTP error.
+- **Delivery guarantee:** best-effort with one retry, bounded by `WEBHOOK_TIMEOUT_SECONDS` (default 15s). It fires at most once per fresh completion and is **never** re-sent on the redelivery/marker-resend path, so a worker restart between the reply and the callback can drop it. Treat the durable `result_url` as the source of truth and de-duplicate on `job_id`. A non-2xx response or connection error is logged and dropped, not retried indefinitely.
 
 ---
 

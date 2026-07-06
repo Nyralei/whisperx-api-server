@@ -52,3 +52,21 @@ def test_mode_invalid_value_raises(monkeypatch):
     get_config.cache_clear()
     with pytest.raises(ValidationError):
         get_config()
+
+
+def test_concurrency_note_logged_when_limit_gt_one(monkeypatch, caplog):
+    from whisperx_api_server.transcriber import log_concurrency_notes
+
+    _load(monkeypatch, MAX_CONCURRENT_TRANSCRIPTIONS="4")
+    with caplog.at_level("WARNING"):
+        log_concurrency_notes()
+    assert any("per-model lock" in r.getMessage() for r in caplog.records)
+
+
+def test_concurrency_note_silent_when_limit_one(monkeypatch, caplog):
+    from whisperx_api_server.transcriber import log_concurrency_notes
+
+    _load(monkeypatch, MAX_CONCURRENT_TRANSCRIPTIONS="1")
+    with caplog.at_level("WARNING"):
+        log_concurrency_notes()
+    assert not any("per-model lock" in r.getMessage() for r in caplog.records)

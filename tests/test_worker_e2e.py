@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 
+import whisperx_worker.handler as worker_handler
 import whisperx_worker.processor as processor
 from fake_backends import fake_transcription
 from whisperx_api_server import kafka_client, request_status
@@ -101,6 +102,8 @@ async def worker_env(kafka_bootstrap, minio_endpoint, monkeypatch):
         "KAFKA__CONSUMER_GROUP_WORKER": f"worker-{uid}",
         "KAFKA__MAX_DELIVERY_ATTEMPTS": "3",
         "KAFKA__REPLY_TIMEOUT_SECONDS": "30",
+        # The webhook test posts to a loopback capture server.
+        "URL_FETCH_ALLOW_PRIVATE_HOSTS": "true",
     }
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -342,6 +345,116 @@ async def test_poison_job_routed_to_dlq_and_future_fails_fast(worker_env, monkey
     assert future.done()
     with pytest.raises(RuntimeError):
         future.result()
+
+
+async def test_completion_webhook_delivered_through_real_worker(
+    worker_env, monkeypatch
+):
+    """3.3: a job carrying callback_url has its result envelope POSTed once to the
+    callback, through the real worker and a real HTTP round-trip."""
+    from aiohttp import web
+
+    cfg = worker_env
+    monkeypatch.setattr(processor, "load_audio_from_bytes", _fake_load_audio)
+
+    received: list[dict] = []
+
+    async def _hook(request):
+        received.append(await request.json())
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_post("/hook", _hook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    callback_url = f"http://127.0.0.1:{port}/hook"
+
+    job_id = "job-webhook-1"
+    key = await s3_client.upload_audio(b"rawbytes", job_id, "a.wav")
+    event = _job_event(job_id, key)
+    event["callback_url"] = callback_url
+
+    producer = await _producer(cfg)
+    consumer, _tp = await _worker_consumer(cfg)
+    try:
+        await _produce_job(producer, cfg, event)
+        ctx = WorkerContext(
+            producer=producer, config=cfg, commit=consumer.commit, worker_id="w-test"
+        )
+        msg = await asyncio.wait_for(consumer.getone(), timeout=20)
+        assert msg.value is not None
+        await handle_message(json.loads(msg.value), ctx)
+    finally:
+        await consumer.stop()
+        await producer.stop()
+        await runner.cleanup()
+
+    # Delivery is awaited inside handle_message (before commit), so it's arrived.
+    assert len(received) == 1
+    assert received[0]["job_id"] == job_id
+    assert received[0]["status"] == "ok"
+    assert received[0]["result"]["text"] == "hello world"
+
+
+async def test_graceful_shutdown_finishes_inflight_and_skips_next(
+    worker_env, monkeypatch
+):
+    """3.5: a shutdown request (what the SIGTERM handler does) landing mid-job lets
+    the in-flight job finish — reply + commit — then the loop exits without
+    consuming the next queued job."""
+    cfg = worker_env
+    monkeypatch.setattr(processor, "load_audio_from_bytes", _fake_load_audio)
+
+    j1, j2 = "job-drain-1", "job-drain-2"
+    k1 = await s3_client.upload_audio(b"raw1", j1, "a.wav")
+    k2 = await s3_client.upload_audio(b"raw2", j2, "a.wav")
+
+    shutdown_event = asyncio.Event()
+    job_in_flight = [False]
+    processed: list[str] = []
+    real_handle = worker_handler.handle_message
+
+    async def _spy_handle(event, ctx):
+        shutdown_event.set()  # SIGTERM arrives while the first job is running
+        await real_handle(event, ctx)
+        processed.append(event["job_id"])
+
+    monkeypatch.setattr(worker_handler, "handle_message", _spy_handle)
+
+    producer = await _producer(cfg)
+    consumer = AIOKafkaConsumer(
+        bootstrap_servers=cfg.kafka.bootstrap_servers,
+        group_id=cfg.kafka.consumer_group_worker,
+        enable_auto_commit=False,
+        auto_offset_reset="earliest",
+    )
+    await consumer.start()
+    consumer.subscribe(topics=[cfg.kafka.request_topic])
+    ctx = WorkerContext(
+        producer=producer, config=cfg, commit=consumer.commit, worker_id="w-test"
+    )
+    try:
+        await _produce_job(producer, cfg, _job_event(j1, k1))
+        await _produce_job(producer, cfg, _job_event(j2, k2))
+        await asyncio.wait_for(
+            worker_handler.consume_loop(consumer, ctx, shutdown_event, job_in_flight),
+            timeout=30,
+        )
+    finally:
+        await consumer.stop()
+        await producer.stop()
+
+    # Only the in-flight job ran and was persisted; the queued job is untouched.
+    assert processed == [j1]
+    assert await s3_client.get_result(j1) is not None
+    assert await s3_client.get_result(j2) is None
+
+    replies = await _drain_topic(cfg, cfg.kafka.reply_topic, j1)
+    assert len(replies) == 1
+    assert replies[0]["status"] == "ok"
 
 
 async def test_reply_fanned_out_to_every_replica_group(worker_env):

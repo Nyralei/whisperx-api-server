@@ -82,6 +82,20 @@ def init_concurrency() -> None:
     _decode_semaphore = asyncio.Semaphore(d) if d > 0 else None
 
 
+def log_concurrency_notes() -> None:
+    """Warn that raising the inference limit doesn't parallelize one model."""
+    n = get_config().max_concurrent_transcriptions
+    if n > 1:
+        logger.warning(
+            "max_concurrent_transcriptions=%d, but each transcription pipeline "
+            "holds a per-model lock during inference: requests for the SAME model "
+            "still run one at a time. The limit parallelizes across DISTINCT "
+            "models (and the align/diarize stages); raise same-model throughput "
+            "with more GPUs or replicas/workers.",
+            n,
+        )
+
+
 def _get_concurrency_semaphore() -> asyncio.Semaphore | None:
     return _concurrency_semaphore
 
@@ -543,6 +557,7 @@ async def _submit_kafka_job(
     request_id: str,
     *,
     track_future: bool,
+    callback_url: str | None = None,
 ) -> asyncio.Future | None:
     """Upload (or forward the URL), publish the request, and announce the job.
 
@@ -594,7 +609,13 @@ async def _submit_kafka_job(
     )
     try:
         future = await kafka_client.submit_job(
-            request_id, s3_key, source_url, safe_name, params, track_future=track_future
+            request_id,
+            s3_key,
+            source_url,
+            safe_name,
+            params,
+            track_future=track_future,
+            callback_url=callback_url,
         )
     except Exception as e:
         request_status.mark_failed(request_id, str(e), type(e).__name__)
@@ -618,12 +639,18 @@ async def submit_kafka_job(
     params: dict[str, Any],
     request_id: str,
     source_url: str | None = None,
+    callback_url: str | None = None,
 ) -> None:
     """Submit a job and return without waiting for the reply (async API). The
     terminal envelope is durable in S3 (results/{job_id}); the caller polls
     /status and fetches the outcome from /result."""
     await _submit_kafka_job(
-        audio_file, source_url, params, request_id, track_future=False
+        audio_file,
+        source_url,
+        params,
+        request_id,
+        track_future=False,
+        callback_url=callback_url,
     )
 
 
@@ -633,10 +660,16 @@ async def transcribe_via_kafka(
     params: dict[str, Any],
     request_id: str,
     source_url: str | None = None,
+    callback_url: str | None = None,
 ) -> dict[str, Any]:
     config = get_config()
     future = await _submit_kafka_job(
-        audio_file, source_url, params, request_id, track_future=True
+        audio_file,
+        source_url,
+        params,
+        request_id,
+        track_future=True,
+        callback_url=callback_url,
     )
     assert future is not None  # track_future=True always registers a future
     try:

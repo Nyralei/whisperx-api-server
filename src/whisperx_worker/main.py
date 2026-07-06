@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import signal
@@ -15,7 +14,7 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
-from whisperx_worker.handler import WorkerContext, handle_message
+from whisperx_worker.handler import WorkerContext, consume_loop
 from whisperx_worker.health_server import WorkerReadiness, start_health_server
 
 logger = logging.getLogger(__name__)
@@ -75,9 +74,10 @@ async def run_worker() -> None:
             config.metrics.worker_port,
         )
 
-    from whisperx_api_server.transcriber import init_concurrency
+    from whisperx_api_server.transcriber import init_concurrency, log_concurrency_notes
 
     init_concurrency()
+    log_concurrency_notes()
 
     shutdown_event = asyncio.Event()
 
@@ -195,54 +195,7 @@ async def run_worker() -> None:
     )
 
     try:
-        while not shutdown_event.is_set():
-            # Poll with a bounded timeout so SIGTERM during idle periods
-            # exits the loop within ~1s.
-            records = await consumer.getmany(timeout_ms=1000, max_records=1)
-            if not records:
-                continue
-
-            messages = [m for msgs in records.values() for m in msgs]
-            for msg in messages:
-                if msg.value is None:
-                    logger.warning(
-                        "Empty Kafka message value (offset=%s, partition=%s), skipping",
-                        msg.offset,
-                        msg.partition,
-                    )
-                    await consumer.commit()
-                    continue
-                try:
-                    event = json.loads(msg.value)
-                except Exception:
-                    preview = msg.value[:200] if msg.value else b""
-                    logger.error(
-                        "Failed to parse Kafka message (offset=%s, partition=%s), skipping. "
-                        "Raw value preview: %r",
-                        msg.offset,
-                        msg.partition,
-                        preview,
-                    )
-                    await consumer.commit()
-                    continue
-
-                job_id = event.get("job_id", "<unknown>")
-                logger.info("Job %s: received", job_id)
-
-                # Pause consumer — process one job at a time. `job_in_flight` is set
-                # before pause so the rebalance listener re-applies it if assignments
-                # change while this job runs.
-                job_in_flight[0] = True
-                consumer.pause(*consumer.assignment())
-                try:
-                    await handle_message(event, ctx)
-                finally:
-                    job_in_flight[0] = False
-                    consumer.resume(*consumer.assignment())
-                    logger.info("Job %s: done, consumer resumed", job_id)
-
-        logger.info("Worker shutdown requested, exiting message loop")
-
+        await consume_loop(consumer, ctx, shutdown_event, job_in_flight)
     finally:
         if sigterm_registered:
             with contextlib.suppress(NotImplementedError, RuntimeError):

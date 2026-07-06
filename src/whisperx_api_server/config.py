@@ -372,6 +372,11 @@ class Config(BaseSettings):
     url_fetch_allow_private_hosts: bool = Field(default=False)
     url_fetch_allowed_hosts: list[str] = Field(default_factory=list)
 
+    # Total ceiling for a completion-webhook POST (callback_url), in seconds.
+    # Kept short: the callback carries the result envelope, not bulk audio. The
+    # SSRF policy and connect timeout are shared with the url_fetch settings above.
+    webhook_timeout_seconds: float = Field(default=15.0, gt=0)
+
     # On SIGTERM, refuse new requests with HTTP 503 and wait up to this many
     # seconds for in-flight work to drain before tearing down. Best-effort on
     # Windows (signal handlers raise NotImplementedError under ProactorEventLoop).

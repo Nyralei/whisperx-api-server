@@ -279,6 +279,7 @@ async def submit_job(
     params: dict[str, Any],
     *,
     track_future: bool = True,
+    callback_url: str | None = None,
 ) -> asyncio.Future | None:
     """Publish a job to the request topic. With track_future (sync path) a future
     is registered for the reply consumer to resolve; without it (async path) the
@@ -301,6 +302,7 @@ async def submit_job(
         "audio_url": audio_url,
         "filename": filename,
         "params": params,
+        "callback_url": callback_url,
     }
     try:
         await _producer.send_and_wait(

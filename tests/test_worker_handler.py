@@ -187,6 +187,107 @@ async def test_redelivered_completed_job_resends_without_reprocessing(
     assert harness.s3.claims == {}
 
 
+async def test_completion_webhook_fires_on_success(harness, monkeypatch):
+    monkeypatch.setattr(handler, "process_job", _fake_ok)
+    calls: list = []
+
+    async def _spy(url, envelope, config):
+        calls.append((url, envelope))
+        return True
+
+    monkeypatch.setattr(handler.webhook, "deliver_result", _spy)
+    event = {
+        "job_id": "cb1",
+        "s3_key": "audio/cb1/a.wav",
+        "params": {},
+        "callback_url": "http://hook.example/x",
+    }
+
+    await handler.handle_message(event, harness.ctx)
+
+    assert len(calls) == 1
+    url, envelope = calls[0]
+    assert url == "http://hook.example/x"
+    # The webhook carries the exact stored envelope.
+    assert envelope == harness.s3.results["cb1"]
+    assert json.loads(envelope)["status"] == "ok"
+
+
+async def test_completion_webhook_not_sent_without_callback_url(harness, monkeypatch):
+    monkeypatch.setattr(handler, "process_job", _fake_ok)
+    calls: list = []
+
+    async def _spy(url, envelope, config):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(handler.webhook, "deliver_result", _spy)
+    event = {"job_id": "cb0", "s3_key": "audio/cb0/a.wav", "params": {}}
+
+    await handler.handle_message(event, harness.ctx)
+
+    assert calls == []
+
+
+async def test_completion_webhook_skipped_on_resend(harness, monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("process_job must not run on the resend path")
+
+    monkeypatch.setattr(handler, "process_job", _boom)
+    calls: list = []
+
+    async def _spy(url, envelope, config):
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(handler.webhook, "deliver_result", _spy)
+    harness.s3.results["cb2"] = json.dumps(
+        {"job_id": "cb2", "status": "ok", "result": {"text": "cached"}}
+    )
+    event = {
+        "job_id": "cb2",
+        "s3_key": "audio/cb2/a.wav",
+        "params": {},
+        "callback_url": "http://hook.example/x",
+    }
+
+    await handler.handle_message(event, harness.ctx)
+
+    # A redelivery resends the reply but must never re-fire the webhook.
+    assert calls == []
+    assert harness.skip.count == 1
+
+
+async def test_completion_webhook_fires_on_dlq(harness, monkeypatch):
+    async def _crash(event, **kwargs):
+        raise _Crash("killed")
+
+    monkeypatch.setattr(handler, "process_job", _crash)
+    calls: list = []
+
+    async def _spy(url, envelope, config):
+        calls.append((url, envelope))
+        return True
+
+    monkeypatch.setattr(handler.webhook, "deliver_result", _spy)
+    event = {
+        "job_id": "cb3",
+        "s3_key": "audio/cb3/a.wav",
+        "params": {},
+        "callback_url": "http://hook.example/x",
+    }
+
+    for _ in (1, 2, 3):
+        with pytest.raises(_Crash):
+            await handler.handle_message(event, harness.ctx)
+    assert calls == []  # no webhook while crash-redelivering pre-DLQ
+
+    await handler.handle_message(event, harness.ctx)  # fourth delivery → DLQ
+
+    assert len(calls) == 1
+    assert json.loads(calls[0][1])["status"] == "error"
+
+
 async def test_poison_job_routes_to_dlq_after_max_attempts(harness, monkeypatch):
     async def _crash(event, **kwargs):
         raise _Crash("killed")

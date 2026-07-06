@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 import whisperx_api_server.transcriber as transcriber
+from whisperx_api_server import webhook
 from whisperx_api_server.routers.transcriptions import _CUDA_OOM_EXC
 from whisperx_api_server.transcriber import (
     InvalidAudioError,
@@ -185,6 +186,48 @@ async def test_subtitle_without_alignment_422(make_app):
         )
     assert resp.status_code == 422
     assert "alignment" in resp.json()["detail"].lower()
+
+
+async def test_direct_mode_success_fires_completion_webhook(make_app, monkeypatch):
+    _patch_transcribe(monkeypatch, returns=dict(CANNED))
+    calls: list = []
+
+    async def _spy(url, envelope, config):
+        calls.append((url, envelope))
+        return True
+
+    monkeypatch.setattr(webhook, "deliver_result", _spy)
+    app = make_app(URL_FETCH_ALLOW_PRIVATE_HOSTS="true")
+    async with _client(app) as c:
+        resp = await _post(
+            c,
+            audio_url="http://example.com/a.wav",
+            response_format="json",
+            align="false",
+            callback_url="http://hook.example/done",
+        )
+    assert resp.status_code == 200, resp.text
+    # Background task runs before ASGITransport returns the response.
+    assert len(calls) == 1
+    url, envelope = calls[0]
+    assert url == "http://hook.example/done"
+    env = json.loads(envelope)
+    assert env["status"] == "ok"
+    assert env["job_id"]
+    assert env["result"]["text"] == "hello world"
+
+
+async def test_callback_url_ssrf_rejected_422(make_app, monkeypatch):
+    _patch_transcribe(monkeypatch, returns=dict(CANNED))
+    async with _client(make_app()) as c:
+        resp = await _post(
+            c,
+            audio_url="http://example.com/a.wav",
+            align="false",
+            callback_url="http://127.0.0.1:9/hook",
+        )
+    assert resp.status_code == 422, resp.text
+    assert "callback_url" in resp.json()["detail"].lower()
 
 
 def test_json_canned_is_serializable():

@@ -195,9 +195,11 @@ async def lifespan(app: FastAPI):
             )
 
     from whisperx_api_server.executors import shutdown_executors
-    from whisperx_api_server.transcriber import init_concurrency
+    from whisperx_api_server.transcriber import init_concurrency, log_concurrency_notes
 
     init_concurrency()
+    if config.mode != DistributedMode.KAFKA:
+        log_concurrency_notes()
 
     def _on_status_cleanup_done(task: asyncio.Task) -> None:
         if not task.cancelled() and task.exception() is not None:

@@ -5,14 +5,24 @@ import re
 import time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, Response
 
 import whisperx_api_server.kafka_client as kafka_client
 import whisperx_api_server.s3_client as s3_client
 import whisperx_api_server.transcriber as transcriber
-from whisperx_api_server import request_status
+from whisperx_api_server import request_status, webhook
 from whisperx_api_server.config import (
+    Config,
     DistributedMode,
     Language,
     ResponseFormat,
@@ -24,7 +34,7 @@ from whisperx_api_server.transcriber import (
     QueueFullError,
     UploadTooLargeError,
 )
-from whisperx_api_server.url_fetch import filename_from_url
+from whisperx_api_server.url_fetch import filename_from_url, validate_url_for_fetch
 
 # Mirror routers/status.py and main.py so a malformed id can't reach S3 or logs.
 _REQUEST_ID_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -73,6 +83,26 @@ def _raise_for_transcription_error(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"An unexpected error occurred while processing the {kind} request.",
     ) from e
+
+
+def _schedule_completion_webhook(
+    background_tasks: BackgroundTasks,
+    config: Config,
+    request_id: str,
+    result: dict,
+    callback_url: str,
+) -> None:
+    """Queue the direct-mode completion webhook to run after the response is sent.
+
+    Kafka-mode deliveries are owned by the worker; this covers direct mode only,
+    so the caller is never delayed by the callback POST.
+    """
+    from whisperx_worker.processor import serialize_result
+
+    envelope = serialize_result(
+        {"job_id": request_id, "status": "ok", "result": result}
+    )
+    background_tasks.add_task(webhook.deliver_result, callback_url, envelope, config)
 
 
 logger = logging.getLogger(__name__)
@@ -145,6 +175,7 @@ Returns:
 )
 async def transcribe_audio(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: Annotated[UploadFile | None, File()] = None,
     audio_url: Annotated[str | None, Form()] = None,
     model: Annotated[str | None, Form()] = None,
@@ -166,6 +197,7 @@ async def transcribe_audio(
     chunk_size: Annotated[int | None, Form()] = None,
     batch_size: Annotated[int | None, Form()] = None,
     is_async: Annotated[bool, Form(alias="async")] = False,
+    callback_url: Annotated[str | None, Form()] = None,
 ) -> Response:
     config = get_config()
     if is_async and config.mode != DistributedMode.KAFKA:
@@ -197,6 +229,18 @@ async def transcribe_audio(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide exactly one of 'file' or 'audio_url', not both.",
         )
+    if callback_url is not None:
+        try:
+            await validate_url_for_fetch(
+                callback_url,
+                allow_private_hosts=config.url_fetch_allow_private_hosts,
+                allowed_hosts=config.url_fetch_allowed_hosts,
+            )
+        except InvalidAudioError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"callback_url rejected: {e}",
+            ) from e
     if use_url:
         source_filename = filename_from_url(audio_url)
     else:
@@ -281,6 +325,7 @@ async def transcribe_audio(
                     source_url=audio_url if use_url else None,
                     params=params,
                     request_id=request_id,
+                    callback_url=callback_url,
                 )
                 logger.info("Request ID: %s - Accepted async job", request_id)
                 return JSONResponse(
@@ -297,6 +342,7 @@ async def transcribe_audio(
                 source_url=audio_url if use_url else None,
                 params=params,
                 request_id=request_id,
+                callback_url=callback_url,
             )
         else:
             transcription = await transcriber.transcribe(
@@ -324,6 +370,11 @@ async def transcribe_audio(
         request_id,
         total_time,
     )
+
+    if callback_url is not None and config.mode != DistributedMode.KAFKA:
+        _schedule_completion_webhook(
+            background_tasks, config, request_id, transcription, callback_url
+        )
 
     return format_transcription(
         transcription, response_format, highlight_words=highlight_words

@@ -4,6 +4,8 @@ Kept separate from the run loop in ``main.py`` so the redelivery / claim / DLQ
 logic is testable with fakes instead of a live broker.
 """
 
+import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import whisperx_api_server.s3_client as s3_client
+from whisperx_api_server import webhook
 from whisperx_api_server.observability import kafka as _kafka
 from whisperx_worker.processor import process_job, serialize_result
 from whisperx_worker.progress import publish_stage
@@ -57,6 +60,24 @@ async def _delete_claim(ctx: WorkerContext, job_id: str) -> None:
         logger.warning("Job %s: failed to delete claim object", job_id)
 
 
+async def _deliver_callback(
+    event: dict, ctx: WorkerContext, job_id: str, envelope: str
+) -> None:
+    """Fire the completion webhook for a freshly-produced envelope, best-effort.
+
+    Only called on the fresh-processing and DLQ paths, never on the marker-resend
+    path, so a receiver is notified at most once per completion.
+    """
+    url = event.get("callback_url")
+    if not url:
+        return
+    ok = await webhook.deliver_result(url, envelope, ctx.config)
+    if ok:
+        logger.info("Job %s: completion webhook delivered", job_id)
+    else:
+        logger.warning("Job %s: completion webhook not delivered", job_id)
+
+
 async def _route_to_dlq(event: dict, ctx: WorkerContext, attempts: int) -> None:
     job_id = event.get("job_id", "<unknown>")
     kafka_cfg = ctx.config.kafka
@@ -95,6 +116,7 @@ async def _route_to_dlq(event: dict, ctx: WorkerContext, attempts: int) -> None:
         kafka_cfg.reply_topic, key=job_id.encode(), value=envelope.encode()
     )
     await _publish_terminal(ctx, job_id, reply)
+    await _deliver_callback(event, ctx, job_id, envelope)
     await _delete_claim(ctx, job_id)
     await ctx.commit()
     _kafka.dlq_total.inc()
@@ -163,5 +185,63 @@ async def handle_message(event: dict, ctx: WorkerContext) -> None:
         except Exception:
             logger.warning("Job %s: failed to delete S3 object %r", job_id, s3_key)
 
+    await _deliver_callback(event, ctx, job_id, envelope)
     await _delete_claim(ctx, job_id)
     await ctx.commit()
+
+
+async def consume_loop(
+    consumer: Any,
+    ctx: WorkerContext,
+    shutdown_event: asyncio.Event,
+    job_in_flight: list[bool],
+) -> None:
+    """Drain the request topic one job at a time until shutdown is requested.
+
+    The flag is only checked between jobs, so a SIGTERM mid-job lets the in-flight
+    job finish (reply + commit) before the loop exits; queued jobs stay unconsumed.
+    """
+    while not shutdown_event.is_set():
+        records = await consumer.getmany(timeout_ms=1000, max_records=1)
+        if not records:
+            continue
+
+        messages = [m for msgs in records.values() for m in msgs]
+        for msg in messages:
+            if msg.value is None:
+                logger.warning(
+                    "Empty Kafka message value (offset=%s, partition=%s), skipping",
+                    msg.offset,
+                    msg.partition,
+                )
+                await consumer.commit()
+                continue
+            try:
+                event = json.loads(msg.value)
+            except Exception:
+                preview = msg.value[:200] if msg.value else b""
+                logger.error(
+                    "Failed to parse Kafka message (offset=%s, partition=%s), skipping. "
+                    "Raw value preview: %r",
+                    msg.offset,
+                    msg.partition,
+                    preview,
+                )
+                await consumer.commit()
+                continue
+
+            job_id = event.get("job_id", "<unknown>")
+            logger.info("Job %s: received", job_id)
+
+            # Pause — process one job at a time. `job_in_flight` is set before the
+            # pause so the rebalance listener re-applies it if assignments change.
+            job_in_flight[0] = True
+            consumer.pause(*consumer.assignment())
+            try:
+                await handle_message(event, ctx)
+            finally:
+                job_in_flight[0] = False
+                consumer.resume(*consumer.assignment())
+                logger.info("Job %s: done, consumer resumed", job_id)
+
+    logger.info("Worker shutdown requested, exiting message loop")

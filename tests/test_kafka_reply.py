@@ -98,6 +98,34 @@ async def test_late_local_reply_increments_metric(spy_late_reply):
     assert spy_late_reply.count == 1
 
 
+async def test_non_local_stub_reply_is_not_late(spy_late_reply):
+    # A reply landing on a stub built from progress events (job owned elsewhere)
+    # must not count as late.
+    request_status.ensure_tracked("job-stub")
+    st = request_status.get("job-stub")
+    assert st is not None
+    assert st["local"] is False
+
+    kafka_client._handle_reply_event(
+        {"job_id": "job-stub", "status": "ok", "result": {"text": "hi"}}
+    )
+    assert spy_late_reply.count == 0
+
+
+async def test_async_entry_reply_pops_without_future(spy_late_reply):
+    # Async submits register (None, ts) — no awaiter. A reply must clear the
+    # entry without raising and without counting as late.
+    kafka_client._pending_jobs["job-async"] = (None, 0.0)
+    request_status.start("job-async", mode="kafka")
+
+    kafka_client._handle_reply_event(
+        {"job_id": "job-async", "status": "ok", "result": {"text": "hi"}}
+    )
+
+    assert "job-async" not in kafka_client._pending_jobs
+    assert spy_late_reply.count == 0
+
+
 async def test_apply_worker_timeline_unknown_id_noop():
     # No-ops for unknown ids, so the reply consumer needs no extra guard.
     request_status.apply_worker_timeline(

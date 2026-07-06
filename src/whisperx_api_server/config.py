@@ -170,15 +170,15 @@ class WhisperConfig(BaseModel):
     num_workers: int = Field(default=1)
     vad_method: VadMethod = Field(default=VadMethod.PYANNOTE)
     # Custom VAD model instance to assign directly. If set, vad_method is ignored.
-    vad_model: str = Field(default=None)
+    vad_model: str | None = Field(default=None)
     # Overrides for VAD defaults: chunk_size (s), vad_onset (0.0–1.0), vad_offset (0.0–1.0).
     # Defaults: {"chunk_size": 30, "vad_onset": 0.500, "vad_offset": 0.363}
     # Example: WHISPER__VAD_OPTIONS='{"vad_onset": 0.4, "vad_offset": 0.3}'
-    vad_options: dict = Field(default=None)
+    vad_options: dict | None = Field(default=None)
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
     local_files_only: bool = Field(default=False)
-    download_root: str = Field(default=None)
+    download_root: str | None = Field(default=None)
     batch_size: int = Field(default=12)
     chunk_size: int = Field(default=30)
 
@@ -196,7 +196,7 @@ class AlignConfig(BaseModel):
     whitelist: list = Field(default_factory=list)
     cache: bool = Field(default=True)
     preload_model: bool = Field(default=False)
-    preload_model_name: str = Field(default=None)
+    preload_model_name: str | None = Field(default=None)
     local_files_only: bool = Field(default=False)
     # Download NLTK punkt_tab tokenizer at startup so the first alignment request
     # does not block an executor thread on a network call.

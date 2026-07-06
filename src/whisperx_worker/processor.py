@@ -47,7 +47,7 @@ async def process_job(
     *,
     progress_producer: Any = None,
     progress_topic: str | None = None,
-    timeline_out: dict[str, dict[str, float]] | None = None,
+    timeline_out: dict[str, dict[str, float | None]] | None = None,
 ) -> dict[str, Any]:
     config = get_config()
     job_id = event["job_id"]
@@ -114,6 +114,7 @@ async def process_job(
             await _progress("s3_download")
             t0 = time.perf_counter()
             logger.info("Job %s: downloading audio from S3 (key: %s)", job_id, s3_key)
+            assert s3_key is not None
             audio_bytes = await s3_client.download_audio(s3_key)
             profile["s3_download"] = time.perf_counter() - t0
             logger.info(
@@ -204,6 +205,7 @@ async def process_job(
                 )
 
             if diarize:
+                assert diarization_backend is not None
                 await _progress("diarize")
                 t0 = time.perf_counter()
                 result = await diarization_backend.diarize(

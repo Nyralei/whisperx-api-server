@@ -125,7 +125,7 @@ async def handle_message(event: dict, ctx: WorkerContext) -> None:
         return
 
     reply: dict = {"job_id": job_id}
-    timeline: dict[str, dict[str, float]] = {}
+    timeline: dict[str, dict[str, float | None]] = {}
     try:
         result = await process_job(
             event,

@@ -72,6 +72,11 @@ include = ["src", "tests"]
 extraPaths = ["src", "tests"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+# The type-check env is intentionally torch-free and omits optional extras (ML,
+# GPU, kafka-python protocol stubs), so unresolved imports here are expected, not
+# mistakes — runtime guards and ruff's F-rules cover real typos.
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
 
 [tool.ruff]
 target-version = "py310"

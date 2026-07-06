@@ -67,7 +67,9 @@ async def run_worker() -> None:
                 config.metrics.gpu_poll_interval,
             )
 
-        start_http_server(config.metrics.worker_port, registry=get_registry())
+        registry = get_registry()
+        assert registry is not None  # setup_metrics() ran above
+        start_http_server(config.metrics.worker_port, registry=registry)
         logger.info(
             "Worker /metrics server started on port %s",
             config.metrics.worker_port,
@@ -202,6 +204,14 @@ async def run_worker() -> None:
 
             messages = [m for msgs in records.values() for m in msgs]
             for msg in messages:
+                if msg.value is None:
+                    logger.warning(
+                        "Empty Kafka message value (offset=%s, partition=%s), skipping",
+                        msg.offset,
+                        msg.partition,
+                    )
+                    await consumer.commit()
+                    continue
                 try:
                     event = json.loads(msg.value)
                 except Exception:

@@ -59,6 +59,7 @@ async def test_reaps_stale_entry(spy_metrics):
     with pytest.raises(TimeoutError):
         fut.result()
     st = request_status.get("stale")
+    assert st is not None
     assert st["status"] == "failed"
     assert st["error_type"] == "TimeoutError"
     assert reaped.count == 1
@@ -91,5 +92,7 @@ async def test_reaps_awaiterless_entry(spy_metrics):
 
     assert n == 1
     assert "orphan" not in kafka_client._pending_jobs
-    assert request_status.get("orphan")["status"] == "failed"
+    orphan_st = request_status.get("orphan")
+    assert orphan_st is not None
+    assert orphan_st["status"] == "failed"
     assert reaped.count == 1

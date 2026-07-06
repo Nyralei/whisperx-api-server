@@ -133,6 +133,7 @@ Transcribe an audio file. Compatible with the [OpenAI transcription API](https:/
 | `hotwords` | string | — | Comma-separated hotwords to bias toward |
 | `batch_size` | int | config default | Inference batch size |
 | `chunk_size` | int | config default | VAD chunk size in seconds |
+| `async` | bool | `false` | **Kafka mode only.** Return `202 Accepted` immediately instead of blocking; fetch the outcome later. See [Async job submission](#async-job-submission-kafka-mode). |
 
 **Response formats**
 
@@ -208,9 +209,60 @@ Terminal states (`completed` / `failed`) are retained for `REQUEST_STATUS__TTL_S
 **Other responses**
 
 - `400 Bad Request` — malformed `request_id` (must match `[A-Za-z0-9._-]{1,128}`)
-- `404 Not Found` — id is unknown, never received by this replica, or evicted
+- `404 Not Found` — id is unknown, expired, or not yet seen by this replica
 
-> The transcription request/reply path scales across API replicas — each reply is delivered to every replica and only the one holding the job resolves it, so any replica can serve the POST. The status tracker, however, still lives in-process: with multiple replicas behind a load balancer, `/status` is visible only on the replica that handled the POST. Use ID-aware client routing (sticky sessions) for status polling if you scale out; cross-replica status is not yet implemented.
+> Both the request/reply path and `/status` scale across API replicas in Kafka mode. Each reply is delivered to every replica and only the one holding the job resolves it, so any replica can serve the POST. Status converges too: the submitting replica announces the job on the progress topic and every replica consumes the progress stream, so `GET /status` works on any replica behind a load balancer — no sticky sessions required. Each replica's tracker therefore holds entries for jobs across all replicas (bounded by `REQUEST_STATUS__MAX_ENTRIES`, default 4096, well above `KAFKA__MAX_PENDING_JOBS`). In-flight status is still in-memory: a replica restart loses the live history for jobs it learned about (they would expire within minutes anyway), while completed/failed outcomes stay readable for `REQUEST_STATUS__TTL_SECONDS`. Direct mode is single-process and unaffected.
+
+---
+
+### Async job submission (Kafka mode)
+
+By default the transcription POST is synchronous — the HTTP response arrives only when the whole pipeline finishes. In **Kafka mode** you can instead submit the job and return immediately by setting the `async` form field, then fetch the result later. This decouples slow transcriptions from the request connection (no client read-timeout to tune) and survives an API-replica restart, because the result is read from durable storage rather than an in-memory future.
+
+```bash
+# Submit — returns 202 without waiting for transcription
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -H 'X-Request-ID: my-async-1' \
+  -F file=@audio.mp3 -F model=large-v3 -F align=true \
+  -F async=true
+```
+
+**Response (202 Accepted)**
+
+```jsonc
+{
+  "request_id": "my-async-1",
+  "status": "accepted",
+  "status_url": "/v1/audio/transcriptions/my-async-1/status",
+  "result_url": "/v1/audio/transcriptions/my-async-1/result"
+}
+```
+
+Poll `status_url` (see above) to follow progress, then fetch `result_url` once `status` is `completed`. Unlike the synchronous path, you don't need to set `X-Request-ID` up front — the `202` body returns the resolved `request_id` and both URLs immediately, whether the id was client-supplied or server-generated (a `uuid4`). Supplying your own `X-Request-ID` (matching `[A-Za-z0-9._-]{1,128}`) is optional: a predictable id for log correlation. Async is rejected in direct mode with `400 Bad Request`.
+
+---
+
+### `GET /v1/audio/transcriptions/{request_id}/result`
+
+Fetch the final result of an async job (Kafka mode only). It reads the stored `results/{job_id}` envelope from S3, so it works from any replica and after restarts, with no in-memory state required.
+
+**Query parameters**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `response_format` | string | config default | Same formats as the POST: `text`, `json`, `verbose_json`, `vtt_json`, `srt`, `vtt`, `aud` |
+| `highlight_words` | bool | `false` | Highlight words in `vtt`/`srt` output |
+
+Formatting is applied at fetch time from these query parameters — the `response_format` set on the async POST is not stored, so you choose the format (and may request several) when you fetch.
+
+**Responses**
+
+- `200 OK` — formatted transcription (Content-Type per `response_format`), identical to what the synchronous POST would have returned
+- `400 Bad Request` — malformed `request_id`
+- `404 Not Found` — result not available (still pending, unknown, or expired); also returned in direct mode
+- worker failures are replayed with the same status code the synchronous endpoint returns (e.g. invalid audio → `422`, timeout → `504`), not `404`
+
+Results are retained for `S3__OBJECT_EXPIRY_DAYS` (default 1 day) via the bucket lifecycle policy; after that the id 404s.
 
 ---
 

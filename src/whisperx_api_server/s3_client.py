@@ -34,14 +34,15 @@ async def init_client(cfg: S3Config) -> None:
             read_timeout=120,
         ),
     )
-    _client = await ctx.__aenter__()
+    client: S3Client = await ctx.__aenter__()
+    _client = client
     logger.info(
         "S3 client initialized (endpoint: %s, bucket: %s)", cfg.endpoint_url, cfg.bucket
     )
 
     try:
         try:
-            await _client.head_bucket(Bucket=cfg.bucket)
+            await client.head_bucket(Bucket=cfg.bucket)
         except Exception as exc:
             from botocore.exceptions import ClientError
 
@@ -49,11 +50,11 @@ async def init_client(cfg: S3Config) -> None:
                 "Code"
             ] not in ("404", "NoSuchBucket"):
                 raise
-            await _client.create_bucket(Bucket=cfg.bucket)
+            await client.create_bucket(Bucket=cfg.bucket)
             logger.info("Created S3 bucket: %s", cfg.bucket)
 
         if cfg.manage_lifecycle and cfg.object_expiry_days > 0:
-            await _client.put_bucket_lifecycle_configuration(
+            await client.put_bucket_lifecycle_configuration(
                 Bucket=cfg.bucket,
                 LifecycleConfiguration={
                     "Rules": [

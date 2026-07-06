@@ -377,8 +377,10 @@ def create_app() -> FastAPI:
 
         @app.get("/metrics", include_in_schema=False)
         def metrics_endpoint() -> FastAPIResponse:
+            registry = get_registry()
+            assert registry is not None  # metrics enabled ⇒ setup_metrics() ran
             return FastAPIResponse(
-                content=generate_latest(get_registry()),
+                content=generate_latest(registry),
                 media_type=CONTENT_TYPE_LATEST,
             )
 

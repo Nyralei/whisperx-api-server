@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _producer = None
 _admin = None  # AIOKafkaAdminClient singleton, lives for the process lifetime
 _config: KafkaConfig | None = None
-_pending_jobs: dict[str, tuple[asyncio.Future, float]] = {}
+_pending_jobs: dict[str, tuple[asyncio.Future | None, float]] = {}
 _janitor_task: asyncio.Task | None = None
 
 _discovery_cache: tuple[float, dict] | None = None
@@ -121,6 +121,7 @@ async def describe_workers(timeout: float = 5.0) -> dict:
             return cached_payload
 
     lock = _discovery_lock  # set alongside _admin in start(); non-None guaranteed here
+    assert lock is not None
     async with lock:
         now = time.monotonic()
         if _discovery_cache is not None:
@@ -172,6 +173,7 @@ async def _ensure_topics(cfg: KafkaConfig) -> None:
     from aiokafka.admin import NewTopic
     from aiokafka.errors import TopicAlreadyExistsError
 
+    assert _admin is not None  # set in start() immediately before this call
     topics = [
         NewTopic(
             name=cfg.request_topic,
@@ -275,13 +277,21 @@ async def submit_job(
     audio_url: str | None,
     filename: str,
     params: dict[str, Any],
-) -> asyncio.Future:
+    *,
+    track_future: bool = True,
+) -> asyncio.Future | None:
+    """Publish a job to the request topic. With track_future (sync path) a future
+    is registered for the reply consumer to resolve; without it (async path) the
+    entry holds no awaiter — the result is fetched from S3 — and the janitor reaps
+    it if no reply arrives.
+    """
     if _producer is None or _config is None:
         raise RuntimeError("Kafka producer not initialized")
     if bool(s3_key) == bool(audio_url):
         raise ValueError("submit_job requires exactly one of s3_key or audio_url")
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future = loop.create_future()
+    future: asyncio.Future | None = None
+    if track_future:
+        future = asyncio.get_running_loop().create_future()
     _pending_jobs[job_id] = (future, time.monotonic())
     _kafka.pending_jobs.set(len(_pending_jobs))
 
@@ -304,6 +314,33 @@ async def submit_job(
         raise
     logger.debug("Job %s: published to %s", job_id, _config.request_topic)
     return future
+
+
+async def publish_submitted(
+    cfg: KafkaConfig,
+    job_id: str,
+    *,
+    filename: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> None:
+    """Announce a new job on the progress topic so other replicas start tracking
+    it before the first worker stage arrives. Best-effort — never raises."""
+    if _producer is None:
+        return
+    event = {
+        "job_id": job_id,
+        "stage": "submitted",
+        "status": "submitted",
+        "filename": filename,
+        "params": params,
+        "ts": time.time(),
+    }
+    try:
+        await _producer.send(
+            cfg.progress_topic, key=job_id.encode(), value=json.dumps(event).encode()
+        )
+    except Exception:
+        logger.debug("submitted-event publish failed for job %s", job_id, exc_info=True)
 
 
 def _reap_stale_pending(cfg: KafkaConfig, now: float | None = None) -> int:
@@ -361,11 +398,12 @@ def _handle_reply_event(event: dict[str, Any]) -> None:
     _kafka.pending_jobs.set(len(_pending_jobs))
     if entry is not None:
         future, submit_time = entry
-        if not future.done():
-            duration = time.monotonic() - submit_time
-            if event.get("status") == "ok":
+        is_ok = event.get("status") == "ok"
+        # future is None for async submits (no awaiter); popping the entry above
+        # is the only cleanup needed — the result is already durable in S3.
+        if future is not None and not future.done():
+            if is_ok:
                 future.set_result(event["result"])
-                _kafka.job_duration.labels(status="ok").observe(duration)
                 logger.debug("Job %s: resolved from reply", job_id)
             else:
                 future.set_exception(
@@ -374,15 +412,20 @@ def _handle_reply_event(event: dict[str, Any]) -> None:
                         event.get("error", "worker error"),
                     )
                 )
-                _kafka.job_duration.labels(status="error").observe(duration)
                 logger.warning(
                     "Job %s: failed with error: %s", job_id, event.get("error")
                 )
-    elif request_status.get(job_id) is not None:
-        # Tracked locally but the future is gone (timed out / reaped). Replies
-        # for jobs submitted by other replicas have no entry and are ignored.
-        _kafka.late_reply_total.inc()
-        logger.warning("Job %s: reply arrived after the future was gone", job_id)
+        _kafka.job_duration.labels(status="ok" if is_ok else "error").observe(
+            time.monotonic() - submit_time
+        )
+    else:
+        state = request_status.get(job_id)
+        if state is not None and state.get("local"):
+            # Submitted here but the future is gone (timed out / reaped). Replies
+            # for jobs owned by other replicas land on non-local stubs and are
+            # ignored — counting those would just be fan-out noise.
+            _kafka.late_reply_total.inc()
+            logger.warning("Job %s: reply arrived after the future was gone", job_id)
 
 
 async def reply_consumer_loop(cfg: KafkaConfig) -> None:
@@ -408,6 +451,8 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
     )
     try:
         async for msg in consumer:
+            if msg.value is None:
+                continue
             try:
                 event = json.loads(msg.value)
             except Exception:
@@ -420,12 +465,13 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
 
 
 async def progress_consumer_loop(cfg: KafkaConfig) -> None:
-    """Consume per-stage worker progress events and update the local request_status tracker.
+    """Consume per-stage worker progress events and update the request_status tracker.
 
     Each API replica subscribes with a unique consumer group id (prefix + pid + rand)
-    so every replica receives every event from the broker. The replica then filters
-    by whether the request_id is known locally — only the replica that submitted
-    the job has a tracker entry, so other replicas no-op on every message.
+    so every replica receives every event from the broker. A replica upserts a stub
+    entry for any job_id it does not already track, so a replica that did not submit
+    the job (or started mid-job) still converges its status view — this is what makes
+    GET /status work behind a load balancer.
 
     Best-effort: parse errors are logged and skipped; commit failures are ignored
     (we use enable_auto_commit so this is a no-op anyway).
@@ -450,6 +496,8 @@ async def progress_consumer_loop(cfg: KafkaConfig) -> None:
     )
     try:
         async for msg in consumer:
+            if msg.value is None:
+                continue
             try:
                 event = json.loads(msg.value)
             except Exception:
@@ -459,11 +507,22 @@ async def progress_consumer_loop(cfg: KafkaConfig) -> None:
             job_id = event.get("job_id")
             stage = event.get("stage")
             status_val = event.get("status")
-            if not job_id or not stage:
+            if not job_id:
                 continue
-            # Only touch the tracker if this replica submitted the job.
-            if request_status.get(job_id) is None:
+
+            # Job announcement from the submitting replica — create/enrich the stub.
+            if status_val == "submitted":
+                request_status.ensure_tracked(
+                    job_id,
+                    filename=event.get("filename"),
+                    params=event.get("params"),
+                )
                 continue
+
+            if not stage:
+                continue
+            # Upsert so replicas that didn't submit the job still track it.
+            request_status.ensure_tracked(job_id)
 
             try:
                 if status_val == "failed":

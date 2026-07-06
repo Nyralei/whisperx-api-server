@@ -1,11 +1,15 @@
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
+import whisperx_api_server.kafka_client as kafka_client
+import whisperx_api_server.s3_client as s3_client
 import whisperx_api_server.transcriber as transcriber
 from whisperx_api_server import request_status
 from whisperx_api_server.config import (
@@ -22,6 +26,9 @@ from whisperx_api_server.transcriber import (
 )
 from whisperx_api_server.url_fetch import filename_from_url
 
+# Mirror routers/status.py and main.py so a malformed id can't reach S3 or logs.
+_REQUEST_ID_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
 try:
     import torch as _torch
 
@@ -30,17 +37,19 @@ except Exception:  # torch missing or no CUDA build
     _CUDA_OOM_EXC = RuntimeError  # benign fallback; isinstance still works
 
 
-def _raise_for_transcription_error(request_id: str, e: Exception, kind: str) -> None:
+def _raise_for_transcription_error(
+    request_id: str, e: BaseException, kind: str
+) -> None:
     """Map domain exceptions to specific HTTP codes; fall through to 500."""
     if isinstance(e, InvalidAudioError):
         logger.info("Request ID: %s - Invalid audio: %s", request_id, e)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
         ) from e
     if isinstance(e, UploadTooLargeError):
         logger.info("Request ID: %s - Upload too large: %s", request_id, e)
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e)
         ) from e
     if isinstance(e, QueueFullError):
         logger.warning("Request ID: %s - Queue full: %s", request_id, e)
@@ -98,7 +107,7 @@ def get_timestamp_granularities(
         return ["segment"]
     if timestamp_granularities not in TIMESTAMP_GRANULARITIES_COMBINATIONS:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"{timestamp_granularities} is not a valid value for `timestamp_granularities[]`.",
         )
     return timestamp_granularities
@@ -140,7 +149,7 @@ async def transcribe_audio(
     audio_url: Annotated[str | None, Form()] = None,
     model: Annotated[str | None, Form()] = None,
     language: Annotated[Language | None, Form()] = None,
-    prompt: Annotated[str, Form()] = None,
+    prompt: Annotated[str | None, Form()] = None,
     response_format: Annotated[ResponseFormat | None, Form()] = None,
     temperature: Annotated[float, Form()] = 0.0,
     timestamp_granularities: Annotated[
@@ -148,7 +157,7 @@ async def transcribe_audio(
         Form(alias="timestamp_granularities[]"),
     ] = None,
     stream: Annotated[bool, Form()] = False,
-    hotwords: Annotated[str, Form()] = None,
+    hotwords: Annotated[str | None, Form()] = None,
     suppress_numerals: Annotated[bool, Form()] = True,
     highlight_words: Annotated[bool, Form()] = False,
     align: Annotated[bool, Form()] = True,
@@ -156,8 +165,14 @@ async def transcribe_audio(
     speaker_embeddings: Annotated[bool, Form()] = False,
     chunk_size: Annotated[int | None, Form()] = None,
     batch_size: Annotated[int | None, Form()] = None,
+    is_async: Annotated[bool, Form(alias="async")] = False,
 ) -> Response:
     config = get_config()
+    if is_async and config.mode != DistributedMode.KAFKA:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Asynchronous submission (async=true) requires Kafka mode.",
+        )
     if language is None:
         language = config.default_language
     if response_format is None:
@@ -174,17 +189,18 @@ async def transcribe_audio(
     use_url = bool(audio_url)
     if not use_url and (file is None or not file.filename):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide either 'file' or 'audio_url'.",
         )
     if use_url and file is not None and file.filename:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide exactly one of 'file' or 'audio_url', not both.",
         )
     if use_url:
         source_filename = filename_from_url(audio_url)
     else:
+        assert file is not None
         source_filename = file.filename
     request_status.start(
         request_id,
@@ -224,7 +240,7 @@ async def transcribe_audio(
             detail = "Subtitles format ('vtt', 'srt', 'aud', 'vtt_json') requires alignment to be enabled."
             request_status.mark_failed(request_id, detail, "HTTPException")
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=detail,
             )
 
@@ -232,7 +248,7 @@ async def transcribe_audio(
             detail = "Diarization requires alignment to be enabled."
             request_status.mark_failed(request_id, detail, "HTTPException")
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=detail,
             )
 
@@ -259,6 +275,23 @@ async def transcribe_audio(
                 "chunk_size": chunk_size,
                 "asr_options": asr_options,
             }
+            if is_async:
+                await transcriber.submit_kafka_job(
+                    audio_file=None if use_url else file,
+                    source_url=audio_url if use_url else None,
+                    params=params,
+                    request_id=request_id,
+                )
+                logger.info("Request ID: %s - Accepted async job", request_id)
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={
+                        "request_id": request_id,
+                        "status": "accepted",
+                        "status_url": f"/v1/audio/transcriptions/{request_id}/status",
+                        "result_url": f"/v1/audio/transcriptions/{request_id}/result",
+                    },
+                )
             transcription = await transcriber.transcribe_via_kafka(
                 audio_file=None if use_url else file,
                 source_url=audio_url if use_url else None,
@@ -344,17 +377,18 @@ async def translate_audio(
     use_url = bool(audio_url)
     if not use_url and (file is None or not file.filename):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide either 'file' or 'audio_url'.",
         )
     if use_url and file is not None and file.filename:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide exactly one of 'file' or 'audio_url', not both.",
         )
     if use_url:
         source_filename = filename_from_url(audio_url)
     else:
+        assert file is not None
         source_filename = file.filename
     request_status.start(
         request_id,
@@ -424,3 +458,60 @@ async def translate_audio(
     )
 
     return format_transcription(translation, response_format)
+
+
+@router.get(
+    "/v1/audio/transcriptions/{request_id}/result",
+    description=(
+        "Fetch the final result of an async transcription job from durable "
+        "storage (Kafka mode). 404 while pending/unknown/expired; the mapped "
+        "error response for a failed job; the formatted transcription on success. "
+        "Availability is bounded by S3__OBJECT_EXPIRY_DAYS."
+    ),
+    tags=["Transcription"],
+)
+async def get_transcription_result(
+    request_id: str,
+    response_format: ResponseFormat | None = None,
+    highlight_words: bool = False,
+) -> Response:
+    config = get_config()
+    if not _REQUEST_ID_SAFE.match(request_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request_id format.",
+        )
+    if config.mode != DistributedMode.KAFKA:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Stored results are only available in Kafka mode.",
+        )
+    if response_format is None:
+        response_format = config.default_response_format
+
+    raw = await s3_client.get_result(request_id)
+    if raw is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Result not available (pending, unknown, or expired).",
+        )
+    try:
+        envelope = json.loads(raw)
+    except ValueError as e:
+        logger.error("Request ID: %s - Stored result envelope is corrupt", request_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored result is corrupt.",
+        ) from e
+
+    if envelope.get("status") != "ok":
+        # Reuse the reply-path rehydration so a failed job maps to the same HTTP
+        # code the synchronous endpoint returns (e.g. InvalidAudioError → 422).
+        err = kafka_client._rehydrate_worker_error(
+            envelope.get("error_type"), envelope.get("error", "worker error")
+        )
+        _raise_for_transcription_error(request_id, err, "transcription")
+
+    return format_transcription(
+        envelope.get("result", {}), response_format, highlight_words=highlight_words
+    )

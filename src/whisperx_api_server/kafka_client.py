@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -61,9 +62,11 @@ def _decode_assignment(raw: bytes | None) -> list[dict]:
     if not raw:
         return []
     try:
-        from kafka.protocol.group import ConsumerProtocolMemberAssignment
-
-        decoded = ConsumerProtocolMemberAssignment.decode(raw)
+        # Imported dynamically: the symbol's location varies across kafka-python
+        # versions (and the package may be absent), so a static import would both
+        # break type-checking and hard-fail here. Any miss drops to the fallback.
+        group_mod = importlib.import_module("kafka.protocol.group")
+        decoded = group_mod.ConsumerProtocolMemberAssignment.decode(raw)
         return [
             {"topic": topic, "partitions": list(partitions)}
             for topic, partitions in decoded.assignment

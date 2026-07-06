@@ -418,7 +418,7 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
     k2 = await s3_client.upload_audio(b"raw2", j2, "a.wav")
 
     shutdown_event = asyncio.Event()
-    job_in_flight = [False]
+    paused_for_job = [False]
     processed: list[str] = []
     real_handle = worker_handler.handle_message
 
@@ -447,7 +447,7 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
         await _produce_job(producer, cfg, _job_event(j1, k1))
         await _produce_job(producer, cfg, _job_event(j2, k2))
         await asyncio.wait_for(
-            worker_handler.consume_loop(consumer, ctx, shutdown_event, job_in_flight),
+            worker_handler.consume_loop(consumer, ctx, shutdown_event, paused_for_job),
             timeout=30,
         )
     finally:

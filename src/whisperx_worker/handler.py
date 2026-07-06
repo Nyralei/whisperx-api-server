@@ -5,8 +5,10 @@ logic is testable with fakes instead of a live broker.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -211,16 +213,105 @@ async def commit_safely(commit: Callable[[], Awaitable[None]]) -> None:
         )
 
 
+_HANDOFF_THROTTLE_SECONDS = 1.0
+
+
+def _foreign_partitions(consumer: Any, topic: str) -> set[int]:
+    """Partitions of `topic` owned by other members of the consumer group."""
+    all_partitions = consumer.partitions_for_topic(topic) or set()
+    owned = {tp.partition for tp in consumer.assignment() if tp.topic == topic}
+    return all_partitions - owned
+
+
+async def _relay_queued_message(
+    msg: Any,
+    tp: Any,
+    consumer: Any,
+    ctx: WorkerContext,
+    current_job_id: str,
+    paused_for_job: list[bool],
+) -> None:
+    """Republish a message fetched mid-job so an idle worker picks it up instead
+    of it waiting behind this worker's in-flight job.
+
+    The original is never committed here: a mid-job commit would also commit the
+    in-flight job's offset and break its crash-redelivery. It stays uncommitted
+    until the job's terminal commit; a crash before then redelivers it and the
+    claims/results idempotency layer deduplicates against the relayed copy.
+    """
+    if msg.value is None:
+        return
+    try:
+        event = json.loads(msg.value)
+    except Exception:
+        preview = msg.value[:200]
+        logger.error(
+            "Unparseable message fetched mid-job (offset=%s, partition=%s), "
+            "dropping. Raw value preview: %r",
+            msg.offset,
+            msg.partition,
+            preview,
+        )
+        return
+    job_id = event.get("job_id", "<unknown>")
+    if job_id == current_job_id:
+        # Relaying would start a concurrent duplicate on an idle worker; the
+        # in-flight run stores the result this delivery would need anyway.
+        logger.info("Job %s: duplicate delivery during own run, dropped", job_id)
+        return
+    event["handoff_hops"] = hops = int(event.get("handoff_hops", 0)) + 1
+    request_topic = ctx.config.kafka.request_topic
+    foreign = _foreign_partitions(consumer, request_topic)
+    if not foreign:
+        # Group shrank to just this worker mid-job: requeue onto our own log
+        # (key-hashed, no explicit partition) and stop pulling until job end.
+        paused_for_job[0] = True
+        consumer.pause(*consumer.assignment())
+    target = random.choice(sorted(foreign)) if foreign else None
+    try:
+        await ctx.producer.send_and_wait(
+            request_topic,
+            key=msg.key,
+            value=json.dumps(event).encode(),
+            partition=target,
+        )
+    except Exception:
+        logger.warning(
+            "Job %s: handoff republish failed; rewinding to retry",
+            job_id,
+            exc_info=True,
+        )
+        # Best-effort: if the partition was revoked meanwhile, its new owner
+        # refetches the message anyway.
+        with contextlib.suppress(Exception):
+            consumer.seek(tp, msg.offset)
+        return
+    _kafka.handoff_total.inc()
+    logger.info(
+        "Job %s: handed off to partition %s while busy (hop %d)",
+        job_id,
+        target,
+        hops,
+    )
+
+
 async def consume_loop(
     consumer: Any,
     ctx: WorkerContext,
     shutdown_event: asyncio.Event,
-    job_in_flight: list[bool],
+    paused_for_job: list[bool],
 ) -> None:
     """Drain the request topic one job at a time until shutdown is requested.
 
-    The flag is only checked between jobs, so a SIGTERM mid-job lets the in-flight
-    job finish (reply + commit) before the loop exits; queued jobs stay unconsumed.
+    While a job runs the loop keeps polling: each getmany resets aiokafka's
+    fetcher-idle clock, so a job outlasting max_poll_interval_ms no longer evicts
+    the worker from the group. Messages fetched during the job are relayed to a
+    partition owned by another worker rather than queueing behind this job; a
+    worker that owns every partition pauses instead (paused_for_job gates the
+    rebalance listener's pause re-apply).
+
+    The shutdown flag is only checked between jobs, so a SIGTERM mid-job lets the
+    in-flight job finish (reply + commit) before the loop exits.
     """
     while not shutdown_event.is_set():
         records = await consumer.getmany(timeout_ms=1000, max_records=1)
@@ -254,20 +345,22 @@ async def consume_loop(
             job_id = event.get("job_id", "<unknown>")
             logger.info("Job %s: received", job_id)
 
-            # One job at a time: pause every partition, then run the job as a task
-            # while this loop keeps polling. Each (empty) getmany resets aiokafka's
-            # fetcher-idle clock, so a job outlasting max_poll_interval_ms no longer
-            # evicts the worker from the group and kills it at its terminal commit.
-            # job_in_flight gates the rebalance listener's pause re-apply.
-            job_in_flight[0] = True
-            consumer.pause(*consumer.assignment())
+            if not _foreign_partitions(consumer, ctx.config.kafka.request_topic):
+                paused_for_job[0] = True
+                consumer.pause(*consumer.assignment())
             task = asyncio.create_task(handle_message(event, ctx))
             try:
                 while not task.done():
-                    await consumer.getmany(timeout_ms=1000, max_records=1)
+                    queued = await consumer.getmany(timeout_ms=1000, max_records=1)
+                    for q_tp, q_msgs in queued.items():
+                        for q_msg in q_msgs:
+                            await _relay_queued_message(
+                                q_msg, q_tp, consumer, ctx, job_id, paused_for_job
+                            )
+                            await asyncio.sleep(_HANDOFF_THROTTLE_SECONDS)
                 await task
             finally:
-                job_in_flight[0] = False
+                paused_for_job[0] = False
                 consumer.resume(*consumer.assignment())
                 logger.info("Job %s: done, consumer resumed", job_id)
 

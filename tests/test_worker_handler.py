@@ -25,19 +25,24 @@ class _Send:
     topic: str
     key: bytes
     value: bytes
+    partition: int | None = None
 
 
 class FakeProducer:
     def __init__(self, order):
         self.sends: list[_Send] = []
+        self.fail_next_sends = 0
         self._order = order
 
-    async def send_and_wait(self, topic, *, key, value):
-        self.sends.append(_Send(topic, key, value))
+    async def send_and_wait(self, topic, *, key, value, partition=None):
+        if self.fail_next_sends > 0:
+            self.fail_next_sends -= 1
+            raise RuntimeError("broker unavailable")
+        self.sends.append(_Send(topic, key, value, partition))
         self._order.append(("send_and_wait", topic))
 
-    async def send(self, topic, *, key, value):
-        self.sends.append(_Send(topic, key, value))
+    async def send(self, topic, *, key, value, partition=None):
+        self.sends.append(_Send(topic, key, value, partition))
         self._order.append(("send", topic))
 
 
@@ -331,20 +336,35 @@ class _Msg:
     value: bytes
     offset: int = 0
     partition: int = 0
+    key: bytes | None = None
+
+
+@dataclass(frozen=True)
+class _TP:
+    topic: str
+    partition: int
 
 
 class FakeConsumer:
     """Minimal getmany/pause/resume stand-in for the run loop."""
 
-    def __init__(self, first_batch):
-        self._first = first_batch
+    def __init__(
+        self, batches, *, topic, partitions=frozenset({0}), owned=frozenset({0})
+    ):
+        self._batches = list(batches)  # one getmany return value per entry
         self.getmany_calls = 0
         self.pause_calls = 0
         self.resume_calls = 0
-        self._assignment = {"tp-0"}
+        self.seeks: list[tuple[_TP, int]] = []
+        self._topic = topic
+        self._partitions = set(partitions)
+        self._owned = {_TP(topic, p) for p in owned}
 
     def assignment(self):
-        return set(self._assignment)
+        return set(self._owned)
+
+    def partitions_for_topic(self, topic):
+        return set(self._partitions)
 
     def pause(self, *partitions):
         self.pause_calls += 1
@@ -352,23 +372,58 @@ class FakeConsumer:
     def resume(self, *partitions):
         self.resume_calls += 1
 
+    def seek(self, tp, offset):
+        self.seeks.append((tp, offset))
+
     async def getmany(self, timeout_ms, max_records):
         self.getmany_calls += 1
         await asyncio.sleep(0)  # yield like a real broker poll
-        if self.getmany_calls == 1:
-            return self._first
+        if self._batches:
+            return self._batches.pop(0)
         return {}
 
     async def commit(self):
         await asyncio.sleep(0)
 
 
+def _job_msg(job_id: str, offset: int = 0, **extra) -> _Msg:
+    return _Msg(
+        json.dumps({"job_id": job_id, **extra}).encode(),
+        offset=offset,
+        key=job_id.encode(),
+    )
+
+
+async def _run_loop_with_slow_job(harness, monkeypatch, consumer, *, ticks=10):
+    """Run consume_loop with a handle_message that spins `ticks` event-loop
+    iterations, then requests shutdown. Returns (handled_job_ids, paused_flag)."""
+    monkeypatch.setattr(handler, "_HANDOFF_THROTTLE_SECONDS", 0)
+    shutdown_event = asyncio.Event()
+    paused_for_job = [False]
+    handled: list[str] = []
+
+    async def _slow_handle(event, ctx):
+        handled.append(event["job_id"])
+        for _ in range(ticks):
+            await asyncio.sleep(0)
+        shutdown_event.set()
+
+    monkeypatch.setattr(handler, "handle_message", _slow_handle)
+    await asyncio.wait_for(
+        handler.consume_loop(consumer, harness.ctx, shutdown_event, paused_for_job),
+        timeout=5,
+    )
+    return handled, paused_for_job
+
+
 async def test_consume_loop_keeps_polling_while_job_runs(harness, monkeypatch):
     """A long job must not starve the poll loop: getmany has to keep firing while
     handle_message runs, or aiokafka evicts the worker past max_poll_interval_ms."""
+    monkeypatch.setattr(handler, "_HANDOFF_THROTTLE_SECONDS", 0)
     shutdown_event = asyncio.Event()
-    job_in_flight = [False]
+    paused_for_job = [False]
     polls_during: list[int] = []
+    topic = harness.ctx.config.kafka.request_topic
 
     async def _slow_handle(event, ctx):
         start = consumer.getmany_calls
@@ -379,18 +434,108 @@ async def test_consume_loop_keeps_polling_while_job_runs(harness, monkeypatch):
 
     monkeypatch.setattr(handler, "handle_message", _slow_handle)
 
-    msg = _Msg(json.dumps({"job_id": "live-1"}).encode())
-    consumer = FakeConsumer({"tp-0": [msg]})
+    consumer = FakeConsumer([{_TP(topic, 0): [_job_msg("live-1")]}], topic=topic)
 
     await asyncio.wait_for(
-        handler.consume_loop(consumer, harness.ctx, shutdown_event, job_in_flight),
+        handler.consume_loop(consumer, harness.ctx, shutdown_event, paused_for_job),
         timeout=5,
     )
 
     assert polls_during and polls_during[0] >= 1  # polled during the in-flight job
+    # Sole owner of every partition: nothing to relay to, so it pauses.
     assert consumer.pause_calls == 1
     assert consumer.resume_calls == 1
-    assert job_in_flight == [False]
+    assert paused_for_job == [False]
+
+
+async def test_queued_job_relayed_to_foreign_partition(harness, monkeypatch):
+    """A message arriving mid-job must be republished to another worker's
+    partition — uncommitted — instead of waiting behind the in-flight job."""
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer(
+        [{tp: [_job_msg("A", offset=10)]}, {tp: [_job_msg("B", offset=11)]}],
+        topic=topic,
+        partitions={0, 1, 2},
+        owned={0},
+    )
+
+    handled, paused_for_job = await _run_loop_with_slow_job(
+        harness, monkeypatch, consumer
+    )
+
+    assert handled == ["A"]  # B was never processed here
+    relayed = [s for s in harness.producer.sends if s.topic == topic]
+    assert len(relayed) == 1
+    event = json.loads(relayed[0].value)
+    assert event["job_id"] == "B"
+    assert event["handoff_hops"] == 1
+    assert relayed[0].partition in {1, 2}
+    assert consumer.pause_calls == 0  # relay mode never pauses
+    assert harness.commits == []  # relay never commits mid-job
+    assert paused_for_job == [False]
+
+
+async def test_duplicate_of_inflight_job_dropped_not_relayed(harness, monkeypatch):
+    """A redelivery of the job currently being processed must not be relayed —
+    that would start a concurrent duplicate run on an idle worker."""
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer(
+        [{tp: [_job_msg("A", offset=10)]}, {tp: [_job_msg("A", offset=11)]}],
+        topic=topic,
+        partitions={0, 1, 2},
+        owned={0},
+    )
+
+    handled, _ = await _run_loop_with_slow_job(harness, monkeypatch, consumer)
+
+    assert handled == ["A"]
+    assert [s for s in harness.producer.sends if s.topic == topic] == []
+
+
+async def test_relay_publish_failure_rewinds_for_retry(harness, monkeypatch):
+    """If the republish fails, the consumer seeks back so the message is
+    refetched instead of being silently consumed past."""
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer(
+        [
+            {tp: [_job_msg("A", offset=10)]},
+            {tp: [_job_msg("B", offset=11)]},
+            {tp: [_job_msg("B", offset=11)]},  # refetch after seek
+        ],
+        topic=topic,
+        partitions={0, 1, 2},
+        owned={0},
+    )
+    harness.producer.fail_next_sends = 1
+
+    handled, _ = await _run_loop_with_slow_job(harness, monkeypatch, consumer)
+
+    assert handled == ["A"]
+    assert consumer.seeks == [(tp, 11)]
+    relayed = [s for s in harness.producer.sends if s.topic == topic]
+    assert len(relayed) == 1
+    assert json.loads(relayed[0].value)["job_id"] == "B"
+
+
+async def test_garbage_mid_job_dropped_without_relay(harness, monkeypatch):
+    """Unparseable messages fetched mid-job are dropped, not republished."""
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer(
+        [{tp: [_job_msg("A", offset=10)]}, {tp: [_Msg(b"not json", offset=11)]}],
+        topic=topic,
+        partitions={0, 1, 2},
+        owned={0},
+    )
+
+    handled, _ = await _run_loop_with_slow_job(harness, monkeypatch, consumer)
+
+    assert handled == ["A"]
+    assert [s for s in harness.producer.sends if s.topic == topic] == []
+    assert consumer.seeks == []
 
 
 async def test_commit_safely_swallows_rebalance_error():

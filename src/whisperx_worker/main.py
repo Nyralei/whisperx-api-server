@@ -145,23 +145,24 @@ async def run_worker() -> None:
 
     from aiokafka import ConsumerRebalanceListener
 
-    job_in_flight = [False]
+    paused_for_job = [False]
 
     class _PauseAwareRebalanceListener(ConsumerRebalanceListener):
         """Restores `consumer.pause()` state across partition reassignments.
 
-        The worker pauses the consumer for the duration of a single job to
-        enforce one-job-at-a-time semantics. Without this listener, a Kafka
-        rebalance (broker restart, partition reassignment, etc.) silently
-        clears the paused set on the newly-assigned partitions and the
-        consumer would begin pulling fresh records mid-job.
+        A worker that owns every partition of the request topic pauses the
+        consumer for the duration of a job (there is no other worker to relay
+        queued messages to). Without this listener, a Kafka rebalance (broker
+        restart, partition reassignment, etc.) silently clears the paused set
+        on the newly-assigned partitions and the consumer would begin pulling
+        fresh records mid-job.
         """
 
         async def on_partitions_revoked(self, revoked):
             return
 
         async def on_partitions_assigned(self, assigned):
-            if job_in_flight[0] and assigned:
+            if paused_for_job[0] and assigned:
                 consumer.pause(*assigned)
                 logger.info(
                     "Rebalance: re-applied pause on %d partition(s) for in-flight job",
@@ -195,7 +196,7 @@ async def run_worker() -> None:
     )
 
     try:
-        await consume_loop(consumer, ctx, shutdown_event, job_in_flight)
+        await consume_loop(consumer, ctx, shutdown_event, paused_for_job)
     finally:
         if sigterm_registered:
             with contextlib.suppress(NotImplementedError, RuntimeError):

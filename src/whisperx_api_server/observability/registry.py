@@ -255,6 +255,11 @@ def _setup_kafka_instruments(registry: "CollectorRegistry") -> None:
         "Redelivered jobs whose cached result was resent without reprocessing",
         registry=registry,
     )
+    _kafka.handoff_total = Counter(
+        "whisperx_kafka_handoff_total",
+        "Queued jobs relayed to another worker's partition while a job was in flight",
+        registry=registry,
+    )
 
     import whisperx_api_server.kafka_client as kafka_client
 

@@ -1,5 +1,8 @@
+import contextlib
 import logging
+import os
 import sys
+import tempfile
 from typing import TYPE_CHECKING
 
 from whisperx_api_server.config import S3Config
@@ -124,14 +127,40 @@ async def upload_audio_stream(upload_file, job_id: str, filename: str) -> str:
     return key
 
 
-async def download_audio(key: str) -> bytes:
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+_DOWNLOAD_WRITE_BUFFER_SIZE = 1024 * 1024  # 1 MiB
+
+
+async def download_audio_to_temp(key: str, suffix: str = "") -> str:
+    """Stream an S3 object into a temp file; returns the file path."""
     if _client is None or _config is None:
         raise RuntimeError("S3 client not initialized")
-    response = await _client.get_object(Bucket=_config.bucket, Key=key)
-    async with response["Body"] as stream:
-        data = await stream.read()
-    logger.debug("Downloaded %s bytes from s3://%s/%s", len(data), _config.bucket, key)
-    return data
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        file_path = tmp.name
+    total = 0
+    try:
+        response = await _client.get_object(Bucket=_config.bucket, Key=key)
+        # keep the StreamingBody wrapper: `async with` unwraps to the raw
+        # aiohttp response, whose read() takes no size argument
+        body = response["Body"]
+        try:
+            with open(file_path, "wb", buffering=_DOWNLOAD_WRITE_BUFFER_SIZE) as f:
+                while True:
+                    chunk = await body.read(_DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    f.write(chunk)
+        finally:
+            body.close()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(file_path)
+        raise
+    logger.debug(
+        "Downloaded %s bytes from s3://%s/%s to temp file", total, _config.bucket, key
+    )
+    return file_path
 
 
 async def delete_audio(key: str) -> None:

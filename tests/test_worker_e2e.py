@@ -149,7 +149,7 @@ class _FlakyCommit:
         await self._real()
 
 
-async def _fake_load_audio(audio_bytes, request_id, sample_rate=16000):
+async def _fake_load_audio(file_path, request_id, sample_rate=16000):
     # Keep the handler contract (S3 download + real inference stages) in the test
     # while skipping the ffmpeg decode, which is covered by the direct-mode suite.
     return np.zeros(sample_rate, dtype="float32")
@@ -234,7 +234,7 @@ async def test_marker_resend_skips_reprocess_through_real_worker(
     """1.4: a completed job redelivered (crash before commit) resends the stored
     envelope from S3 without rerunning inference."""
     cfg = worker_env
-    monkeypatch.setattr(processor, "load_audio_from_bytes", _fake_load_audio)
+    monkeypatch.setattr(processor, "load_audio_from_path", _fake_load_audio)
     skip_spy = _SpyCounter()
     monkeypatch.setattr(
         "whisperx_api_server.observability.kafka.idempotent_skip_total", skip_spy
@@ -285,7 +285,7 @@ async def test_poison_job_routed_to_dlq_and_future_fails_fast(worker_env, monkey
     """1.3: a job that keeps killing the worker is retired to the DLQ after
     max_delivery_attempts, and the error reply fails the submitter's future."""
     cfg = worker_env
-    monkeypatch.setattr(processor, "load_audio_from_bytes", _fake_load_audio)
+    monkeypatch.setattr(processor, "load_audio_from_path", _fake_load_audio)
     dlq_spy = _SpyCounter()
     monkeypatch.setattr("whisperx_api_server.observability.kafka.dlq_total", dlq_spy)
 
@@ -360,7 +360,7 @@ async def test_completion_webhook_delivered_through_real_worker(
     from aiohttp import web
 
     cfg = worker_env
-    monkeypatch.setattr(processor, "load_audio_from_bytes", _fake_load_audio)
+    monkeypatch.setattr(processor, "load_audio_from_path", _fake_load_audio)
 
     received: list[dict] = []
 
@@ -411,7 +411,7 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
     the in-flight job finish — reply + commit — then the loop exits without
     consuming the next queued job."""
     cfg = worker_env
-    monkeypatch.setattr(processor, "load_audio_from_bytes", _fake_load_audio)
+    monkeypatch.setattr(processor, "load_audio_from_path", _fake_load_audio)
 
     j1, j2 = "job-drain-1", "job-drain-2"
     k1 = await s3_client.upload_audio(b"raw1", j1, "a.wav")

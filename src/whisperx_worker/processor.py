@@ -1,5 +1,7 @@
+import contextlib
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -20,7 +22,8 @@ from whisperx_api_server.transcriber import (
     _cleanup_cache_only,
     _finalize_text,
     _get_concurrency_semaphore,
-    load_audio_from_bytes,
+    _safe_filename_suffix,
+    load_audio_from_path,
 )
 from whisperx_worker.progress import publish_stage
 
@@ -65,6 +68,7 @@ async def process_job(
 
     start_time = time.perf_counter()
     audio = None
+    file_path = None
     concurrency_sem = _get_concurrency_semaphore()
     profile: dict[str, float] = {}
     # timeline carries wall-clock (time.time()) per-stage timestamps back to the
@@ -95,7 +99,7 @@ async def process_job(
             await _progress("url_download")
             t0 = time.perf_counter()
             logger.info("Job %s: downloading audio from URL", job_id)
-            audio_bytes = await url_fetch.download_url_to_bytes(
+            file_path = await url_fetch.download_url_to_temp(
                 audio_url,
                 job_id,
                 max_bytes=config.max_upload_size_bytes,
@@ -115,7 +119,9 @@ async def process_job(
             t0 = time.perf_counter()
             logger.info("Job %s: downloading audio from S3 (key: %s)", job_id, s3_key)
             assert s3_key is not None
-            audio_bytes = await s3_client.download_audio(s3_key)
+            file_path = await s3_client.download_audio_to_temp(
+                s3_key, suffix=_safe_filename_suffix(filename)
+            )
             profile["s3_download"] = time.perf_counter() - t0
             logger.info(
                 "Job %s: S3 download took %.2f seconds", job_id, profile["s3_download"]
@@ -123,9 +129,14 @@ async def process_job(
 
         await _progress("audio_load")
         t0 = time.perf_counter()
-        audio = await load_audio_from_bytes(audio_bytes, job_id)
+        audio = await load_audio_from_path(file_path, job_id)
         profile["audio_load"] = time.perf_counter() - t0
-        del audio_bytes
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        file_path = None
         logger.info(
             "Job %s: loading audio took %.2f seconds", job_id, profile["audio_load"]
         )
@@ -240,6 +251,9 @@ async def process_job(
 
     finally:
         _close_timeline()
+        with contextlib.suppress(Exception):
+            if file_path is not None and os.path.exists(file_path):
+                os.remove(file_path)
         if config.audio_cleanup and audio is not None:
             del audio
             logger.info("Job %s: audio data cleaned up", job_id)

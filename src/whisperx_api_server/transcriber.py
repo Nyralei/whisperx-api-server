@@ -115,15 +115,20 @@ def _cleanup_cache_only():
 
 
 _SAMPLE_RATE = 16000  # matches whisperx.audio.SAMPLE_RATE
+_DECODE_READ_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
-def _ffmpeg_decode_cmd(input_arg: str, sample_rate: int) -> list[str]:
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "0"]
-    if input_arg != "pipe:0":
-        cmd.append("-nostdin")
-    cmd += [
+def _ffmpeg_decode_cmd(input_path: str, sample_rate: int) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "0",
+        "-nostdin",
         "-i",
-        input_arg,
+        input_path,
         "-f",
         "f32le",
         "-ac",
@@ -132,45 +137,33 @@ def _ffmpeg_decode_cmd(input_arg: str, sample_rate: int) -> list[str]:
         str(sample_rate),
         "pipe:1",
     ]
-    return cmd
 
 
-async def _run_ffmpeg_decode(
-    input_arg: str,
-    feed_stdin,
+async def load_audio_from_path(
+    file_path: str,
     request_id: str,
-    sample_rate: int,
+    sample_rate: int = _SAMPLE_RATE,
 ) -> np.ndarray:
     import numpy as np
 
     proc = await asyncio.create_subprocess_exec(
-        *_ffmpeg_decode_cmd(input_arg, sample_rate),
-        stdin=asyncio.subprocess.PIPE if feed_stdin else asyncio.subprocess.DEVNULL,
+        *_ffmpeg_decode_cmd(file_path, sample_rate),
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-
-    async def _pump_stdin():
-        if feed_stdin is None:
-            return
-        try:
-            await feed_stdin(proc.stdin)
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # ffmpeg died early; stderr reader will surface the real reason
-        finally:
-            try:
-                if proc.stdin is not None:
-                    proc.stdin.close()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
     assert proc.stdout is not None and proc.stderr is not None  # both opened as PIPE
+
+    async def _read_pcm() -> bytearray:
+        buf = bytearray()
+        while True:
+            chunk = await proc.stdout.read(_DECODE_READ_CHUNK_SIZE)
+            if not chunk:
+                return buf
+            buf += chunk
+
     try:
-        _, pcm, err = await asyncio.gather(
-            _pump_stdin(),
-            proc.stdout.read(),
-            proc.stderr.read(),
-        )
+        pcm, err = await asyncio.gather(_read_pcm(), proc.stderr.read())
     except BaseException:
         proc.kill()
         await proc.wait()
@@ -182,7 +175,10 @@ async def _run_ffmpeg_decode(
         logger.warning("Request ID: %s - ffmpeg exited %s: %s", request_id, rc, msg)
         raise InvalidAudioError(f"Could not decode audio (ffmpeg exit {rc}): {msg}")
 
-    audio = np.frombuffer(pcm, dtype=np.float32).copy()
+    if len(pcm) % 4:  # partial trailing f32 frame
+        del pcm[len(pcm) - len(pcm) % 4 :]
+    # writable zero-copy view; avoids holding PCM in memory twice
+    audio = np.frombuffer(pcm, dtype=np.float32)
     if audio.size == 0:
         raise InvalidAudioError(
             "Decoded audio is empty (no audio stream or zero-length input)."
@@ -194,26 +190,6 @@ async def _run_ffmpeg_decode(
         audio.size / sample_rate,
     )
     return audio
-
-
-async def load_audio_from_path(
-    file_path: str,
-    request_id: str,
-    sample_rate: int = _SAMPLE_RATE,
-) -> np.ndarray:
-    return await _run_ffmpeg_decode(file_path, None, request_id, sample_rate)
-
-
-async def load_audio_from_bytes(
-    audio_bytes: bytes,
-    request_id: str,
-    sample_rate: int = _SAMPLE_RATE,
-) -> np.ndarray:
-    async def feed(stdin):
-        stdin.write(audio_bytes)
-        await stdin.drain()
-
-    return await _run_ffmpeg_decode("pipe:0", feed, request_id, sample_rate)
 
 
 async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:

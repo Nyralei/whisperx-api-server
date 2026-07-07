@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -349,7 +350,12 @@ class FakeConsumer:
     """Minimal getmany/pause/resume stand-in for the run loop."""
 
     def __init__(
-        self, batches, *, topic, partitions=frozenset({0}), owned=frozenset({0})
+        self,
+        batches,
+        *,
+        topic,
+        partitions: Iterable[int] = frozenset({0}),
+        owned: Iterable[int] = frozenset({0}),
     ):
         self._batches = list(batches)  # one getmany return value per entry
         self.getmany_calls = 0

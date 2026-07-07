@@ -153,17 +153,18 @@ async def load_audio_from_path(
         stderr=asyncio.subprocess.PIPE,
     )
     assert proc.stdout is not None and proc.stderr is not None  # both opened as PIPE
+    stdout, stderr = proc.stdout, proc.stderr
 
     async def _read_pcm() -> bytearray:
         buf = bytearray()
         while True:
-            chunk = await proc.stdout.read(_DECODE_READ_CHUNK_SIZE)
+            chunk = await stdout.read(_DECODE_READ_CHUNK_SIZE)
             if not chunk:
                 return buf
             buf += chunk
 
     try:
-        pcm, err = await asyncio.gather(_read_pcm(), proc.stderr.read())
+        pcm, err = await asyncio.gather(_read_pcm(), stderr.read())
     except BaseException:
         proc.kill()
         await proc.wait()

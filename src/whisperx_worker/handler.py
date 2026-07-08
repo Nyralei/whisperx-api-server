@@ -18,7 +18,7 @@ import whisperx_api_server.s3_client as s3_client
 from whisperx_api_server import webhook
 from whisperx_api_server.observability import kafka as _kafka
 from whisperx_worker.processor import process_job, serialize_result
-from whisperx_worker.progress import publish_stage
+from whisperx_worker.progress import publish_heartbeat, publish_stage
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,73 @@ async def _route_to_dlq(event: dict, ctx: WorkerContext, attempts: int) -> None:
     _kafka.dlq_total.inc()
 
 
+_LEASE_DEFER_SECONDS = 30.0
+
+
+async def _resend_cached(ctx: WorkerContext, job_id: str, cached: str) -> None:
+    """Resend a stored terminal envelope for a redelivered, already-run job."""
+    await ctx.producer.send_and_wait(
+        ctx.config.kafka.reply_topic, key=job_id.encode(), value=cached.encode()
+    )
+    await _delete_claim(ctx, job_id)
+    await ctx.commit()
+    _kafka.idempotent_skip_total.inc()
+
+
+async def _defer_leased_job(event: dict, ctx: WorkerContext) -> None:
+    """Another worker holds this job's lease (a rebalance redelivered its
+    uncommitted message mid-run). Park briefly, then requeue the copy to the
+    back of its key-hashed partition and commit this delivery — it keeps coming
+    back until the result appears (resend path) or the lease expires (takeover).
+    """
+    job_id = event.get("job_id", "<unknown>")
+    logger.info("Job %s: lease held by another worker — deferring", job_id)
+    _kafka.lease_deferred_total.inc()
+    await asyncio.sleep(_LEASE_DEFER_SECONDS)
+    cached = await ctx.s3.get_result(job_id)
+    if cached is not None:
+        logger.info("Job %s: result appeared while deferring, resending reply", job_id)
+        await _resend_cached(ctx, job_id, cached)
+        return
+    await ctx.producer.send_and_wait(
+        ctx.config.kafka.request_topic,
+        key=job_id.encode(),
+        value=json.dumps(event).encode(),
+    )
+    await ctx.commit()
+
+
+async def _job_liveness_loop(ctx: WorkerContext, job_id: str) -> None:
+    """Periodic proof-of-life while a job runs: renew the S3 processing lease
+    (keeps redelivered duplicates deferring) and publish a heartbeat progress
+    event (keeps the API's inactivity timeout from reaping jobs whose current
+    stage outlasts it). Runs until cancelled at the job's terminal step.
+    """
+    ttl = ctx.config.kafka.job_lease_ttl_seconds
+    interval = ttl / 5.0
+    lease_held = True
+    while True:
+        await asyncio.sleep(interval)
+        await publish_heartbeat(ctx.producer, ctx.config.kafka.progress_topic, job_id)
+        if not lease_held:
+            continue
+        try:
+            if not await ctx.s3.renew_job_lease(job_id, ctx.worker_id, ttl):
+                lease_held = False
+                logger.error(
+                    "Job %s: processing lease lost mid-run; continuing — a "
+                    "duplicate runner may exist, results deduplicate via the "
+                    "stored envelope",
+                    job_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Job %s: lease renewal failed; will retry", job_id, exc_info=True
+            )
+
+
 async def handle_message(event: dict, ctx: WorkerContext) -> None:
     job_id = event.get("job_id", "<unknown>")
     kafka_cfg = ctx.config.kafka
@@ -133,63 +200,79 @@ async def handle_message(event: dict, ctx: WorkerContext) -> None:
     cached = await ctx.s3.get_result(job_id)
     if cached is not None:
         logger.info("Job %s: result already stored, resending reply", job_id)
-        await ctx.producer.send_and_wait(
-            kafka_cfg.reply_topic, key=job_id.encode(), value=cached.encode()
-        )
-        await _delete_claim(ctx, job_id)
-        await ctx.commit()
-        _kafka.idempotent_skip_total.inc()
+        await _resend_cached(ctx, job_id, cached)
         return
 
-    # Count this delivery before any work, so a job that kills the worker
-    # mid-process is still counted and eventually retired to the DLQ.
-    attempts = await ctx.s3.increment_claim(job_id)
+    # Take the processing lease before any work: a live lease elsewhere means a
+    # concurrent run is in flight — defer instead of duplicating it. Acquisition
+    # counts this delivery attempt, so a job that kills the worker mid-process
+    # is still counted and eventually retired to the DLQ.
+    acquired, attempts = await ctx.s3.acquire_job_lease(
+        job_id, ctx.worker_id, kafka_cfg.job_lease_ttl_seconds
+    )
+    if not acquired:
+        await _defer_leased_job(event, ctx)
+        return
     if attempts > kafka_cfg.max_delivery_attempts:
         await _route_to_dlq(event, ctx, attempts)
         return
 
-    reply: dict = {"job_id": job_id}
-    timeline: dict[str, dict[str, float | None]] = {}
+    # The previous holder may have finished between the cached check and the
+    # acquire, leaving a fresh lease over an already-completed job.
+    cached = await ctx.s3.get_result(job_id)
+    if cached is not None:
+        logger.info("Job %s: result stored by previous holder, resending", job_id)
+        await _resend_cached(ctx, job_id, cached)
+        return
+
+    renewer = asyncio.create_task(_job_liveness_loop(ctx, job_id))
     try:
-        result = await process_job(
-            event,
-            progress_producer=ctx.producer,
-            progress_topic=kafka_cfg.progress_topic,
-            timeline_out=timeline,
-        )
-        reply["status"] = "ok"
-        reply["result"] = result
-    except Exception as exc:
-        logger.exception("Job %s: failed", job_id)
-        reply["status"] = "error"
-        reply["error"] = str(exc)
-        # Type name lets the API rehydrate typed exceptions (e.g.
-        # InvalidAudioError → HTTP 422) instead of collapsing to 500.
-        reply["error_type"] = type(exc).__name__
-    if timeline:
-        reply["timeline"] = timeline
-
-    envelope = serialize_result(reply)
-
-    # Envelope before reply: a crash in between replays the job, and the
-    # redelivery resends from this object rather than rerunning.
-    await ctx.s3.put_result(job_id, envelope)
-    await _publish_terminal(ctx, job_id, reply)
-    await ctx.producer.send_and_wait(
-        kafka_cfg.reply_topic, key=job_id.encode(), value=envelope.encode()
-    )
-    logger.info("Job %s: reply published to %s", job_id, kafka_cfg.reply_topic)
-
-    s3_key = event.get("s3_key")
-    if ctx.config.s3.delete_after_download and s3_key:
+        reply: dict = {"job_id": job_id}
+        timeline: dict[str, dict[str, float | None]] = {}
         try:
-            await ctx.s3.delete_audio(s3_key)
-        except Exception:
-            logger.warning("Job %s: failed to delete S3 object %r", job_id, s3_key)
+            result = await process_job(
+                event,
+                progress_producer=ctx.producer,
+                progress_topic=kafka_cfg.progress_topic,
+                timeline_out=timeline,
+            )
+            reply["status"] = "ok"
+            reply["result"] = result
+        except Exception as exc:
+            logger.exception("Job %s: failed", job_id)
+            reply["status"] = "error"
+            reply["error"] = str(exc)
+            # Type name lets the API rehydrate typed exceptions (e.g.
+            # InvalidAudioError → HTTP 422) instead of collapsing to 500.
+            reply["error_type"] = type(exc).__name__
+        if timeline:
+            reply["timeline"] = timeline
 
-    await _deliver_callback(event, ctx, job_id, envelope)
-    await _delete_claim(ctx, job_id)
-    await ctx.commit()
+        envelope = serialize_result(reply)
+
+        # Envelope before reply: a crash in between replays the job, and the
+        # redelivery resends from this object rather than rerunning.
+        await ctx.s3.put_result(job_id, envelope)
+        await _publish_terminal(ctx, job_id, reply)
+        await ctx.producer.send_and_wait(
+            kafka_cfg.reply_topic, key=job_id.encode(), value=envelope.encode()
+        )
+        logger.info("Job %s: reply published to %s", job_id, kafka_cfg.reply_topic)
+
+        s3_key = event.get("s3_key")
+        if ctx.config.s3.delete_after_download and s3_key:
+            try:
+                await ctx.s3.delete_audio(s3_key)
+            except Exception:
+                logger.warning("Job %s: failed to delete S3 object %r", job_id, s3_key)
+
+        await _deliver_callback(event, ctx, job_id, envelope)
+        await _delete_claim(ctx, job_id)
+        await ctx.commit()
+    finally:
+        renewer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await renewer
 
 
 _REBALANCE_COMMIT_ERRORS = frozenset({"CommitFailedError", "UnknownMemberIdError"})

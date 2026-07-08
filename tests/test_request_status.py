@@ -54,6 +54,33 @@ def test_terminal_states_are_sticky():
     assert all(s["name"] != "late" for s in st["stages"])
 
 
+def test_reconcile_completed_overrides_failed():
+    request_status.start("r", mode="kafka")
+    request_status.mark_failed("r", "reaped: no reply", "TimeoutError")
+    request_status.reconcile_completed("r")
+
+    st = request_status.get("r")
+    assert st is not None
+    assert st["status"] == "completed"
+    assert st["error"] is None
+    assert st["error_type"] is None
+
+
+def test_reconcile_completed_noop_on_completed_and_unknown():
+    request_status.start("r", mode="kafka")
+    request_status.mark_completed("r")
+    st_before = request_status.get("r")
+    assert st_before is not None
+
+    request_status.reconcile_completed("r")
+    st_after = request_status.get("r")
+    assert st_after is not None
+    assert st_after["completed_at"] == st_before["completed_at"]
+
+    request_status.reconcile_completed("never-seen")
+    assert request_status.get("never-seen") is None
+
+
 def test_ttl_retains_then_evicts():
     request_status.start("r", mode="direct")
     request_status.mark_completed("r")

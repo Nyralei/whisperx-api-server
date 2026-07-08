@@ -212,6 +212,36 @@ def mark_failed(request_id: str, error: str, error_type: str | None = None) -> N
         state["updated_at"] = now
 
 
+def reconcile_completed(request_id: str) -> None:
+    """Settle a state as completed from an authoritative worker reply.
+
+    Unlike mark_completed, this overrides a failed terminal state: a job failed
+    locally by timeout/reap/cancellation may still complete on the worker, and
+    its result envelope is durable — the reply outranks the local guess.
+    """
+    if not request_id:
+        return
+    now = _now()
+    with _lock:
+        state = _states.get(request_id)
+        if state is None:
+            return
+        if state.get("status") == _STATUS_COMPLETED:
+            return
+        if state.get("status") == _STATUS_FAILED:
+            logger.info(
+                "Request %s: failed-by-timeout state overridden by worker reply",
+                request_id,
+            )
+        _close_active_stage(state, now)
+        state["status"] = _STATUS_COMPLETED
+        state["stage"] = _STATUS_COMPLETED
+        state["error"] = None
+        state["error_type"] = None
+        state["completed_at"] = now
+        state["updated_at"] = now
+
+
 def apply_worker_timeline(
     request_id: str,
     timeline: dict[str, dict[str, float]],

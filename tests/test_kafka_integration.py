@@ -151,8 +151,7 @@ async def test_async_submit_registers_no_future(kcfg):
             track_future=False,
         )
         assert future is None
-        stored_future, _ = kafka_client._pending_jobs[job_id]
-        assert stored_future is None
+        assert kafka_client._pending_jobs[job_id].future is None
         msg = await asyncio.wait_for(consumer.getone(), timeout=20)
         assert msg.value is not None
         event = json.loads(msg.value)

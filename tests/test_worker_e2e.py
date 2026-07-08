@@ -345,7 +345,8 @@ async def test_poison_job_routed_to_dlq_and_future_fails_fast(worker_env, monkey
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     request_status.start(job_id, mode="kafka")
-    kafka_client._pending_jobs[job_id] = (future, time.monotonic())
+    now = time.monotonic()
+    kafka_client._pending_jobs[job_id] = kafka_client._PendingJob(future, now, now)
     kafka_client._handle_reply_event(replies[0])
     assert future.done()
     with pytest.raises(RuntimeError):

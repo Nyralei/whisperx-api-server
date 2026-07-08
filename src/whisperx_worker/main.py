@@ -136,6 +136,8 @@ async def run_worker() -> None:
         group_id=config.kafka.consumer_group_worker,
         enable_auto_commit=False,
         max_poll_interval_ms=config.kafka.max_poll_interval_ms,
+        session_timeout_ms=config.kafka.session_timeout_ms,
+        heartbeat_interval_ms=config.kafka.heartbeat_interval_ms,
         auto_offset_reset="earliest",
     )
     producer = AIOKafkaProducer(

@@ -260,6 +260,11 @@ def _setup_kafka_instruments(registry: "CollectorRegistry") -> None:
         "Queued jobs relayed to another worker's partition while a job was in flight",
         registry=registry,
     )
+    _kafka.lease_deferred_total = Counter(
+        "whisperx_kafka_lease_deferred_total",
+        "Redelivered jobs deferred because another worker holds the processing lease",
+        registry=registry,
+    )
 
     import whisperx_api_server.kafka_client as kafka_client
 

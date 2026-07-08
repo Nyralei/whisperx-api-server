@@ -230,8 +230,19 @@ class KafkaConfig(BaseModel):
     # to all replicas; only the replica holding the job's future resolves it and
     # the rest no-op. Mirrors the progress-consumer fan-out below.
     reply_group_id: str = Field(default="whisperx-api-reply")
+    # Inactivity timeout: a job is failed only after this long with no reply and
+    # no worker signal. Workers heartbeat every job_lease_ttl_seconds/5 while
+    # processing, so active jobs of any length stay alive; keep this above
+    # job_lease_ttl_seconds (crash-takeover gap) plus expected queue wait.
     reply_timeout_seconds: float = Field(default=3600.0)
     max_poll_interval_ms: int = Field(default=600_000)
+    # Worker consumer group liveness. GIL-holding native calls (e.g. diarization
+    # clustering on very long audio) can freeze the worker event loop for tens of
+    # seconds; aiokafka's 10s default gets the worker evicted mid-job, causing a
+    # rebalance and duplicate redelivery of the in-flight job. Must stay within
+    # the broker's group.min/max.session.timeout.ms window.
+    session_timeout_ms: int = Field(default=120_000)
+    heartbeat_interval_ms: int = Field(default=3_000)
     # Maximum number of jobs waiting for a reply (0 = unlimited).
     # Requests beyond this limit are rejected with HTTP 503.
     max_pending_jobs: int = Field(default=100)
@@ -253,10 +264,14 @@ class KafkaConfig(BaseModel):
     # request_id is locally tracked. Failures to publish are non-fatal.
     progress_topic: str = Field(default="transcription-progress")
     progress_group_id_prefix: str = Field(default="whisperx-api-progress")
-    # A job that is delivered more than this many times (tracked per job via a
-    # claims/{job_id} counter in S3) is routed to the dead-letter topic instead
+    # A job that is delivered more than this many times (tracked per job via the
+    # claims/{job_id} lease in S3) is routed to the dead-letter topic instead
     # of being redelivered forever — the guard against a worker-killing poison job.
     max_delivery_attempts: int = Field(default=3, gt=0)
+    # Processing-lease TTL. The active worker renews well within this window; a
+    # redelivered duplicate defers while the lease is live and takes over only
+    # after it expires (crash recovery latency is bounded by this value).
+    job_lease_ttl_seconds: float = Field(default=300.0, gt=0)
     dead_letter_topic: str = Field(default="transcription-dlq")
 
 

@@ -49,3 +49,20 @@ async def publish_stage(
         logger.debug(
             "progress publish failed for job %s stage %s", job_id, stage, exc_info=True
         )
+
+
+async def publish_heartbeat(producer: Any, topic: str, job_id: str) -> None:
+    """Prove the worker is still on the job between stage boundaries, so the
+    API's inactivity timeout survives stages longer than the timeout itself
+    (a multi-hour file can spend 20+ minutes inside a single stage). Stage-less
+    on purpose: consumers that don't know the heartbeat status skip stage-less
+    events. Best-effort — never raises."""
+    if producer is None or not topic or not job_id:
+        return
+    event = {"job_id": job_id, "status": "heartbeat", "ts": time.time()}
+    try:
+        await producer.send(
+            topic, key=job_id.encode(), value=json.dumps(event).encode()
+        )
+    except Exception:
+        logger.debug("heartbeat publish failed for job %s", job_id, exc_info=True)

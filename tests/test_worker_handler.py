@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -50,9 +51,10 @@ class FakeProducer:
 class FakeS3:
     def __init__(self, order):
         self.results: dict[str, str] = {}
-        self.claims: dict[str, int] = {}
+        self.claims: dict[str, dict] = {}
         self.deleted_audio: list[str] = []
         self.claim_deletes = 0
+        self.renewals: list[str] = []
         self._order = order
 
     async def get_result(self, job_id):
@@ -62,9 +64,30 @@ class FakeS3:
         self.results[job_id] = envelope
         self._order.append(("put_result", job_id))
 
-    async def increment_claim(self, job_id):
-        self.claims[job_id] = self.claims.get(job_id, 0) + 1
-        return self.claims[job_id]
+    async def acquire_job_lease(self, job_id, worker_id, ttl_seconds):
+        now = time.time()
+        lease = self.claims.get(job_id)
+        if (
+            lease is not None
+            and lease["expires_at"] > now
+            and lease["owner"] != worker_id
+        ):
+            return False, lease["attempts"]
+        attempts = (lease["attempts"] if lease else 0) + 1
+        self.claims[job_id] = {
+            "attempts": attempts,
+            "owner": worker_id,
+            "expires_at": now + ttl_seconds,
+        }
+        return True, attempts
+
+    async def renew_job_lease(self, job_id, worker_id, ttl_seconds):
+        self.renewals.append(job_id)
+        lease = self.claims.get(job_id)
+        if lease is None or lease["owner"] != worker_id:
+            return False
+        lease["expires_at"] = time.time() + ttl_seconds
+        return True
 
     async def delete_claim(self, job_id):
         self.claim_deletes += 1
@@ -91,6 +114,7 @@ class Harness:
     commits: list
     dlq: _SpyCounter
     skip: _SpyCounter
+    deferred: _SpyCounter
 
 
 @pytest.fixture
@@ -115,9 +139,12 @@ def harness(monkeypatch):
 
     dlq = _SpyCounter()
     skip = _SpyCounter()
+    deferred = _SpyCounter()
     monkeypatch.setattr(_kafka, "dlq_total", dlq)
     monkeypatch.setattr(_kafka, "idempotent_skip_total", skip)
-    return Harness(ctx, producer, s3, order, commits, dlq, skip)
+    monkeypatch.setattr(_kafka, "lease_deferred_total", deferred)
+    monkeypatch.setattr(handler, "_LEASE_DEFER_SECONDS", 0)
+    return Harness(ctx, producer, s3, order, commits, dlq, skip, deferred)
 
 
 async def _fake_ok(event, *, progress_producer, progress_topic, timeline_out):
@@ -302,11 +329,12 @@ async def test_poison_job_routes_to_dlq_after_max_attempts(harness, monkeypatch)
     monkeypatch.setattr(handler, "process_job", _crash)
     event = {"job_id": "poison", "s3_key": "audio/poison/a.wav", "params": {}}
 
-    # Three crash deliveries: claim increments, never commits, never DLQs.
+    # Three crash deliveries: attempts advance (the crashed worker's own stale
+    # lease is retaken), never commits, never DLQs.
     for attempt in (1, 2, 3):
         with pytest.raises(_Crash):
             await handler.handle_message(event, harness.ctx)
-        assert harness.s3.claims["poison"] == attempt
+        assert harness.s3.claims["poison"]["attempts"] == attempt
         assert harness.commits == []
         assert harness.dlq.count == 0
 
@@ -330,6 +358,152 @@ async def test_poison_job_routes_to_dlq_after_max_attempts(harness, monkeypatch)
     assert harness.s3.claims.get("poison") is None
     assert harness.commits == [True]
     assert harness.dlq.count == 1
+
+
+def _live_lease(owner: str, attempts: int = 1) -> dict:
+    return {"attempts": attempts, "owner": owner, "expires_at": time.time() + 300.0}
+
+
+async def test_live_foreign_lease_defers_and_requeues(harness, monkeypatch):
+    """A redelivered copy of a job running on another worker must be requeued,
+    not processed concurrently."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("process_job must not run while another worker leases")
+
+    monkeypatch.setattr(handler, "process_job", _boom)
+    harness.s3.claims["j-busy"] = _live_lease("other-worker")
+    event = {"job_id": "j-busy", "s3_key": "audio/j-busy/a.wav", "params": {}}
+
+    await handler.handle_message(event, harness.ctx)
+
+    requeued = [
+        s
+        for s in harness.producer.sends
+        if s.topic == harness.ctx.config.kafka.request_topic
+    ]
+    assert len(requeued) == 1
+    assert json.loads(requeued[0].value)["job_id"] == "j-busy"
+    assert _reply_sends(harness) == []
+    assert harness.commits == [True]
+    assert harness.deferred.count == 1
+    # The holder's lease is untouched.
+    assert harness.s3.claims["j-busy"]["owner"] == "other-worker"
+    assert harness.s3.claims["j-busy"]["attempts"] == 1
+
+
+async def test_defer_resends_result_that_appears_while_parked(harness, monkeypatch):
+    """If the lease holder finishes during the defer pause, resend its result
+    instead of requeueing another copy."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("process_job must not run")
+
+    monkeypatch.setattr(handler, "process_job", _boom)
+    harness.s3.claims["j-fin"] = _live_lease("other-worker")
+    envelope = json.dumps({"job_id": "j-fin", "status": "ok", "result": {"text": "x"}})
+
+    calls = {"n": 0}
+    real_get = harness.s3.get_result
+
+    async def _get_result(job_id):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            harness.s3.results.setdefault(job_id, envelope)
+        return await real_get(job_id)
+
+    monkeypatch.setattr(harness.s3, "get_result", _get_result)
+    event = {"job_id": "j-fin", "s3_key": "audio/j-fin/a.wav", "params": {}}
+
+    await handler.handle_message(event, harness.ctx)
+
+    sends = _reply_sends(harness)
+    assert len(sends) == 1
+    assert json.loads(sends[0].value)["result"]["text"] == "x"
+    requeued = [
+        s
+        for s in harness.producer.sends
+        if s.topic == harness.ctx.config.kafka.request_topic
+    ]
+    assert requeued == []
+    assert harness.commits == [True]
+    assert harness.skip.count == 1
+
+
+async def test_expired_foreign_lease_taken_over(harness, monkeypatch):
+    """A lease whose holder crashed (expired, never renewed) must be taken over
+    and the job processed, advancing the attempts counter."""
+    monkeypatch.setattr(handler, "process_job", _fake_ok)
+    harness.s3.claims["j-dead"] = {
+        "attempts": 1,
+        "owner": "crashed-worker",
+        "expires_at": time.time() - 10.0,
+    }
+    event = {"job_id": "j-dead", "s3_key": "audio/j-dead/a.wav", "params": {}}
+
+    await handler.handle_message(event, harness.ctx)
+
+    assert json.loads(_reply_sends(harness)[0].value)["status"] == "ok"
+    assert harness.commits == [True]
+    assert harness.s3.claims.get("j-dead") is None  # released at terminal
+    assert harness.deferred.count == 0
+
+
+async def test_result_stored_between_check_and_acquire_resends(harness, monkeypatch):
+    """The holder finishing between the cached check and our acquire leaves us a
+    fresh lease over a done job — resend, never reprocess."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("process_job must not run")
+
+    monkeypatch.setattr(handler, "process_job", _boom)
+    envelope = json.dumps({"job_id": "j-race", "status": "ok", "result": {"text": "r"}})
+
+    calls = {"n": 0}
+    real_get = harness.s3.get_result
+
+    async def _get_result(job_id):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            harness.s3.results.setdefault(job_id, envelope)
+        return await real_get(job_id)
+
+    monkeypatch.setattr(harness.s3, "get_result", _get_result)
+    event = {"job_id": "j-race", "s3_key": "audio/j-race/a.wav", "params": {}}
+
+    await handler.handle_message(event, harness.ctx)
+
+    assert len(_reply_sends(harness)) == 1
+    assert harness.skip.count == 1
+    assert harness.commits == [True]
+    assert harness.s3.claims.get("j-race") is None
+
+
+async def test_lease_renewed_and_heartbeat_during_long_job(harness, monkeypatch):
+    """The liveness loop must fire while process_job runs: the lease outlives
+    jobs longer than the TTL, and heartbeats keep the API's inactivity clock
+    fresh through stages longer than the reply timeout."""
+    harness.ctx.config.kafka = KafkaConfig(job_lease_ttl_seconds=0.05)
+
+    async def _slow_ok(event, *, progress_producer, progress_topic, timeline_out):
+        await asyncio.sleep(0.1)
+        return {"text": "done", "segments": []}
+
+    monkeypatch.setattr(handler, "process_job", _slow_ok)
+    event = {"job_id": "j-slow", "s3_key": "audio/j-slow/a.wav", "params": {}}
+
+    await handler.handle_message(event, harness.ctx)
+
+    assert "j-slow" in harness.s3.renewals
+    heartbeats = [
+        s
+        for s in harness.producer.sends
+        if s.topic == harness.ctx.config.kafka.progress_topic
+        and json.loads(s.value).get("status") == "heartbeat"
+    ]
+    assert heartbeats and json.loads(heartbeats[0].value)["job_id"] == "j-slow"
+    assert "stage" not in json.loads(heartbeats[0].value)
+    assert json.loads(_reply_sends(harness)[0].value)["status"] == "ok"
 
 
 @dataclass

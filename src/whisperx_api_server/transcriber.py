@@ -649,23 +649,33 @@ async def transcribe_via_kafka(
         callback_url=callback_url,
     )
     assert future is not None  # track_future=True always registers a future
+    timeout = config.kafka.reply_timeout_seconds
     try:
-        result = await asyncio.wait_for(
-            future, timeout=config.kafka.reply_timeout_seconds
-        )
+        result = await kafka_client.wait_for_reply(request_id, future, timeout)
         logger.info("Request ID: %s - Received result from worker", request_id)
         request_status.mark_completed(request_id)
         return result
-    except asyncio.TimeoutError as timeout_exc:
-        kafka_client._pending_jobs.pop(request_id, None)
+    except TimeoutError as timeout_exc:
+        kafka_client.discard_pending(request_id)
         _kafka.job_timeout_total.inc()
-        logger.error("Request ID: %s - Timed out waiting for worker reply", request_id)
+        logger.error(
+            "Request ID: %s - No worker reply or progress within %.0fs",
+            request_id,
+            timeout,
+        )
         err = TimeoutError(
-            f"Job {request_id} timed out after {config.kafka.reply_timeout_seconds}s"
+            f"Job {request_id} timed out: no worker reply or progress within {timeout}s"
         )
         request_status.mark_failed(request_id, str(err), "TimeoutError")
         raise err from timeout_exc
-    except BaseException as e:
-        kafka_client._pending_jobs.pop(request_id, None)
+    except asyncio.CancelledError:
+        # Client disconnect / shutdown. The worker keeps processing and the reply
+        # consumer settles status + pops the entry when the result lands, so the
+        # job must not be marked failed here. Cancelling the future just tells
+        # the reply consumer there is no awaiter left.
+        future.cancel()
+        raise
+    except Exception as e:
+        kafka_client.discard_pending(request_id)
         request_status.mark_failed(request_id, str(e), type(e).__name__)
         raise

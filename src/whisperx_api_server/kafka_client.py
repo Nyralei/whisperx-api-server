@@ -7,6 +7,7 @@ import os
 import struct
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from whisperx_api_server import request_status
@@ -15,10 +16,20 @@ from whisperx_api_server.observability import kafka as _kafka
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class _PendingJob:
+    future: asyncio.Future | None
+    submitted_at: float
+    # Refreshed by worker progress events; reply/liveness timeouts measure
+    # inactivity from here, not total elapsed time since submission.
+    last_activity: float
+
+
 _producer = None
 _admin = None  # AIOKafkaAdminClient singleton, lives for the process lifetime
 _config: KafkaConfig | None = None
-_pending_jobs: dict[str, tuple[asyncio.Future | None, float]] = {}
+_pending_jobs: dict[str, _PendingJob] = {}
 _janitor_task: asyncio.Task | None = None
 
 _discovery_cache: tuple[float, dict] | None = None
@@ -51,6 +62,37 @@ def _rehydrate_worker_error(error_type: str | None, message: str) -> BaseExcepti
 
 def pending_count() -> int:
     return len(_pending_jobs)
+
+
+def touch_pending(job_id: str) -> None:
+    """Record worker activity for a pending job, pushing its liveness deadline out."""
+    entry = _pending_jobs.get(job_id)
+    if entry is not None:
+        entry.last_activity = time.monotonic()
+
+
+def discard_pending(job_id: str) -> None:
+    if _pending_jobs.pop(job_id, None) is not None:
+        _kafka.pending_jobs.set(len(_pending_jobs))
+
+
+async def wait_for_reply(job_id: str, future: asyncio.Future, timeout: float) -> Any:
+    """Await the reply future, timing out only after `timeout` seconds of worker
+    inactivity (no reply and no progress events), not total elapsed time.
+    Raises TimeoutError; never cancels or discards the pending entry itself.
+    """
+    while not future.done():
+        entry = _pending_jobs.get(job_id)
+        if entry is None:
+            # Entry vanished without resolving the future (reaped mid-await).
+            raise TimeoutError(f"Job {job_id}: pending entry was reaped")
+        remaining = entry.last_activity + timeout - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Job {job_id}: no reply or worker progress within {timeout}s"
+            )
+        await asyncio.wait([future], timeout=remaining)
+    return future.result()
 
 
 def _decode_assignment(raw: bytes | None) -> list[dict]:
@@ -296,7 +338,8 @@ async def submit_job(
     future: asyncio.Future | None = None
     if track_future:
         future = asyncio.get_running_loop().create_future()
-    _pending_jobs[job_id] = (future, time.monotonic())
+    now = time.monotonic()
+    _pending_jobs[job_id] = _PendingJob(future, now, now)
     _kafka.pending_jobs.set(len(_pending_jobs))
 
     event = {
@@ -349,24 +392,29 @@ async def publish_submitted(
 
 
 def _reap_stale_pending(cfg: KafkaConfig, now: float | None = None) -> int:
-    """Drop pending jobs whose reply never arrived; return the count reaped.
+    """Drop pending jobs with no reply and no worker activity; return the count reaped.
 
+    Staleness is measured from last_activity (refreshed by progress events), so a
+    worker grinding through long audio is never reaped while it reports stages.
     The +60s margin past reply_timeout_seconds means this never races a live
-    awaiter (which pops its own entry on timeout). It only catches entries with
-    no awaiter (async submits) or genuine leaks.
+    awaiter (which discards its own entry on timeout). It only catches entries
+    with no awaiter (async submits) or genuine leaks.
     """
     cutoff = (now if now is not None else time.monotonic()) - (
         cfg.reply_timeout_seconds + 60.0
     )
-    stale = [job_id for job_id, (_, ts) in _pending_jobs.items() if ts < cutoff]
+    stale = [
+        job_id
+        for job_id, entry in _pending_jobs.items()
+        if entry.last_activity < cutoff
+    ]
     for job_id in stale:
         entry = _pending_jobs.pop(job_id, None)
         if entry is None:
             continue
-        future, _ = entry
-        msg = f"Job {job_id} reaped: no worker reply received in time"
-        if future is not None and not future.done():
-            future.set_exception(TimeoutError(msg))
+        msg = f"Job {job_id} reaped: no reply or worker progress received in time"
+        if entry.future is not None and not entry.future.done():
+            entry.future.set_exception(TimeoutError(msg))
         request_status.mark_failed(job_id, msg, "TimeoutError")
         _kafka.pending_reaped_total.inc()
     if stale:
@@ -399,19 +447,18 @@ def _handle_reply_event(event: dict[str, Any]) -> None:
     if timeline:
         request_status.apply_worker_timeline(job_id, timeline)
 
+    is_ok = event.get("status") == "ok"
     entry = _pending_jobs.pop(job_id, None)
     _kafka.pending_jobs.set(len(_pending_jobs))
     if entry is not None:
-        future, submit_time = entry
-        is_ok = event.get("status") == "ok"
         # future is None for async submits (no awaiter); popping the entry above
         # is the only cleanup needed — the result is already durable in S3.
-        if future is not None and not future.done():
+        if entry.future is not None and not entry.future.done():
             if is_ok:
-                future.set_result(event["result"])
+                entry.future.set_result(event["result"])
                 logger.debug("Job %s: resolved from reply", job_id)
             else:
-                future.set_exception(
+                entry.future.set_exception(
                     _rehydrate_worker_error(
                         event.get("error_type"),
                         event.get("error", "worker error"),
@@ -421,16 +468,37 @@ def _handle_reply_event(event: dict[str, Any]) -> None:
                     "Job %s: failed with error: %s", job_id, event.get("error")
                 )
         _kafka.job_duration.labels(status="ok" if is_ok else "error").observe(
-            time.monotonic() - submit_time
+            time.monotonic() - entry.submitted_at
         )
     else:
         state = request_status.get(job_id)
         if state is not None and state.get("local"):
-            # Submitted here but the future is gone (timed out / reaped). Replies
-            # for jobs owned by other replicas land on non-local stubs and are
-            # ignored — counting those would just be fan-out noise.
+            # Submitted here but the future is gone (timed out / reaped / awaiter
+            # cancelled). Replies for jobs owned by other replicas land on
+            # non-local stubs and are ignored — counting those would just be
+            # fan-out noise.
             _kafka.late_reply_total.inc()
-            logger.warning("Job %s: reply arrived after the future was gone", job_id)
+            if is_ok:
+                logger.warning(
+                    "Job %s: reply arrived after the future was gone; "
+                    "status reconciled — result available via /result",
+                    job_id,
+                )
+            else:
+                logger.warning(
+                    "Job %s: reply arrived after the future was gone", job_id
+                )
+
+    # The reply is the authoritative terminal signal: it settles status even when
+    # no awaiter remains (async submits, cancelled/timed-out sync awaiters) and
+    # flips a failed-by-timeout state back to completed — the result envelope is
+    # durable in S3 regardless of who is still listening.
+    if is_ok:
+        request_status.reconcile_completed(job_id)
+    else:
+        request_status.mark_failed(
+            job_id, event.get("error", "worker error"), event.get("error_type")
+        )
 
 
 async def reply_consumer_loop(cfg: KafkaConfig) -> None:
@@ -508,43 +576,52 @@ async def progress_consumer_loop(cfg: KafkaConfig) -> None:
             except Exception:
                 logger.warning("Progress consumer: failed to parse message, skipping")
                 continue
-
-            job_id = event.get("job_id")
-            stage = event.get("stage")
-            status_val = event.get("status")
-            if not job_id:
-                continue
-
-            # Job announcement from the submitting replica — create/enrich the stub.
-            if status_val == "submitted":
-                request_status.ensure_tracked(
-                    job_id,
-                    filename=event.get("filename"),
-                    params=event.get("params"),
-                )
-                continue
-
-            if not stage:
-                continue
-            # Upsert so replicas that didn't submit the job still track it.
-            request_status.ensure_tracked(job_id)
-
-            try:
-                if status_val == "failed":
-                    request_status.mark_failed(
-                        job_id,
-                        event.get("error", "worker error"),
-                        event.get("error_type"),
-                    )
-                elif status_val == "completed":
-                    # Defensive — reply path also calls mark_completed; idempotent.
-                    request_status.mark_completed(job_id)
-                else:
-                    request_status.set_stage(job_id, f"worker.{stage}")
-            except Exception:
-                logger.exception(
-                    "Progress consumer: failed to apply event for job %s", job_id
-                )
+            _handle_progress_event(event)
     finally:
         await consumer.stop()
         logger.info("Kafka progress consumer stopped")
+
+
+def _handle_progress_event(event: dict[str, Any]) -> None:
+    job_id = event.get("job_id")
+    stage = event.get("stage")
+    status_val = event.get("status")
+    if not job_id:
+        return
+
+    # Job announcement from the submitting replica — create/enrich the stub.
+    if status_val == "submitted":
+        request_status.ensure_tracked(
+            job_id,
+            filename=event.get("filename"),
+            params=event.get("params"),
+        )
+        return
+
+    # Worker-originated event: proof of life. Push the liveness deadline
+    # out so long-running jobs that keep signalling are never timed out.
+    touch_pending(job_id)
+
+    # Heartbeats exist only for the touch above — no stage bookkeeping.
+    if status_val == "heartbeat":
+        return
+
+    if not stage:
+        return
+    # Upsert so replicas that didn't submit the job still track it.
+    request_status.ensure_tracked(job_id)
+
+    try:
+        if status_val == "failed":
+            request_status.mark_failed(
+                job_id,
+                event.get("error", "worker error"),
+                event.get("error_type"),
+            )
+        elif status_val == "completed":
+            # Defensive — reply path also calls mark_completed; idempotent.
+            request_status.mark_completed(job_id)
+        else:
+            request_status.set_stage(job_id, f"worker.{stage}")
+    except Exception:
+        logger.exception("Progress consumer: failed to apply event for job %s", job_id)

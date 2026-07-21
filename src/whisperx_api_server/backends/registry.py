@@ -19,7 +19,7 @@ _transcription_backends: dict[str, TranscriptionBackend] = {}
 _alignment_backends: dict[str, AlignmentBackend] = {}
 _diarization_backends: dict[str, DiarizationBackend] = {}
 _backend_registration_attempted: set[str] = set()
-_backend_registration_lock = threading.Lock()
+_backend_registration_lock = threading.RLock()
 
 
 def _normalize_backend_name(backend_name: str, stage: str) -> str:
@@ -38,48 +38,42 @@ def _try_auto_register_backend(backend_name: str) -> None:
     with _backend_registration_lock:
         if normalized in _backend_registration_attempted:
             return
+
+        module_name = f"whisperx_api_server.backends.{normalized}_backend"
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as e:
+            if e.name == module_name:
+                _backend_registration_attempted.add(normalized)
+                return
+            raise BackendSelectionError(
+                f"Failed importing backend module '{module_name}': {e}. "
+                "If this is a missing ML dependency, install the ML extras "
+                "(whisperx-api-server[cpu] or [cuda])."
+            ) from e
+        except Exception as e:
+            raise BackendSelectionError(
+                f"Failed importing backend module '{module_name}': {e}"
+            ) from e
+
+        register_function_name = f"register_{normalized}_backends"
+        register_function: Any = getattr(module, register_function_name, None)
+        if register_function is None:
+            register_function = getattr(module, "register_backends", None)
+        if register_function is None or not callable(register_function):
+            raise BackendSelectionError(
+                f"Backend module '{module_name}' must expose a callable "
+                f"'{register_function_name}()' or 'register_backends()'."
+            )
+
+        try:
+            register_function()
+        except Exception as e:
+            raise BackendSelectionError(
+                f"Failed to register backend '{normalized}': {e}"
+            ) from e
+
         _backend_registration_attempted.add(normalized)
-
-    module_name = f"whisperx_api_server.backends.{normalized}_backend"
-    try:
-        module = importlib.import_module(module_name)
-    except ModuleNotFoundError as e:
-        if e.name == module_name:
-            return
-        with _backend_registration_lock:
-            _backend_registration_attempted.discard(normalized)
-        raise BackendSelectionError(
-            f"Failed importing backend module '{module_name}': {e}. "
-            "If this is a missing ML dependency, install the ML extras "
-            "(whisperx-api-server[cpu] or [cuda])."
-        ) from e
-    except Exception as e:
-        with _backend_registration_lock:
-            _backend_registration_attempted.discard(normalized)
-        raise BackendSelectionError(
-            f"Failed importing backend module '{module_name}': {e}"
-        ) from e
-
-    register_function_name = f"register_{normalized}_backends"
-    register_function: Any = getattr(module, register_function_name, None)
-    if register_function is None:
-        register_function = getattr(module, "register_backends", None)
-    if register_function is None or not callable(register_function):
-        with _backend_registration_lock:
-            _backend_registration_attempted.discard(normalized)
-        raise BackendSelectionError(
-            f"Backend module '{module_name}' must expose a callable "
-            f"'{register_function_name}()' or 'register_backends()'."
-        )
-
-    try:
-        register_function()
-    except Exception as e:
-        with _backend_registration_lock:
-            _backend_registration_attempted.discard(normalized)
-        raise BackendSelectionError(
-            f"Failed to register backend '{normalized}': {e}"
-        ) from e
 
 
 def register_transcription_backend(

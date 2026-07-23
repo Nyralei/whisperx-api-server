@@ -137,8 +137,8 @@ async def test_result_invalid_id_400(make_app):
     assert resp.status_code == 400
 
 
-async def test_result_direct_mode_404(make_app):
+async def test_result_direct_mode_unknown_404(make_app):
     async with _client(make_app(MODE="direct")) as c:
         resp = await c.get("/v1/audio/transcriptions/job-x/result")
     assert resp.status_code == 404
-    assert "kafka" in resp.json()["detail"].lower()
+    assert "not available" in resp.json()["detail"].lower()

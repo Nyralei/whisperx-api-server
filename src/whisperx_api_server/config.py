@@ -303,6 +303,15 @@ class MetricsConfig(BaseModel):
     worker_port: int = Field(default=9091)
 
 
+class WebUIConfig(BaseModel):
+    # When false (default), neither the /webui static mount nor the "/" redirect
+    # is registered — the HTTP surface is identical to a UI-less deployment.
+    enabled: bool = Field(default=False)
+    # Directory containing the built UI (index.html + assets/). Unset = auto-detect:
+    # ./webui/dist relative to the working directory, then the source checkout.
+    dist_dir: str | None = Field(default=None)
+
+
 class RequestStatusConfig(BaseModel):
     # How long completed/failed states are retained for polling after the
     # request finishes. Set to 0 to drop terminal states immediately (only
@@ -313,6 +322,21 @@ class RequestStatusConfig(BaseModel):
     max_entries: int = Field(default=4096, gt=0)
     # Interval for the background eviction sweep.
     cleanup_interval_seconds: float = Field(default=30.0, gt=0.0)
+    # SSE stream (.../events): internal poll cadence, heartbeat, and max lifetime.
+    sse_poll_interval_seconds: float = Field(default=0.5, gt=0.0)
+    sse_heartbeat_seconds: float = Field(default=15.0, gt=0.0)
+    sse_max_duration_seconds: float = Field(default=3600.0, gt=0.0)
+
+
+class ResultStoreConfig(BaseModel):
+    # Direct mode only: persist finished verbose results to disk so GET .../result
+    # can re-format them without re-running the pipeline. Kafka mode uses S3.
+    enabled: bool = Field(default=True)
+    # Unset = <tempdir>/whisperx-results.
+    dir: str | None = Field(default=None)
+    # 0 = no time-based expiry (bounded by max_entries only).
+    ttl_seconds: float = Field(default=3600.0, ge=0.0)
+    max_entries: int = Field(default=64, gt=0)
 
 
 class Config(BaseSettings):
@@ -353,6 +377,8 @@ class Config(BaseSettings):
     diarization: DiarizeConfig = DiarizeConfig()
 
     backends: BackendsConfig = BackendsConfig()
+
+    result_store: ResultStoreConfig = ResultStoreConfig()
 
     cache_cleanup: bool = True
 
@@ -408,6 +434,8 @@ class Config(BaseSettings):
     metrics: MetricsConfig = MetricsConfig()
 
     request_status: RequestStatusConfig = RequestStatusConfig()
+
+    webui: WebUIConfig = WebUIConfig()
 
     @model_validator(mode="before")
     @classmethod

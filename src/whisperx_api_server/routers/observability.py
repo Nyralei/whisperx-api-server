@@ -58,10 +58,14 @@ async def info(
     request: Request, detail: Literal["summary", "full"] = Query(default="summary")
 ):
     config = get_config()
+    from whisperx_api_server.formatters import subtitle_formats_supported
+
     payload: dict = {
         "version": _app_version(),
         "mode": config.mode.value,
         "uptime_seconds": round(time.monotonic() - _STARTED_AT, 1),
+        "max_upload_size_bytes": config.max_upload_size_bytes or None,
+        "subtitle_formats_available": subtitle_formats_supported(),
     }
 
     if config.mode == DistributedMode.KAFKA:

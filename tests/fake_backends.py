@@ -57,6 +57,9 @@ class FakeAlignmentBackend:
 
 
 class FakeDiarizationBackend:
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+
     async def preload_default(self) -> None:
         pass
 
@@ -69,8 +72,9 @@ class FakeDiarizationBackend:
     async def unload_model(self, model_name: str) -> bool:
         return False
 
-    async def diarize(self, *, result, audio, speaker_embeddings, request_id):
-        return result
+    async def diarize(self, **kwargs: Any):
+        self.calls.append(kwargs)
+        return kwargs["result"]
 
 
 fake_transcription = FakeTranscriptionBackend()

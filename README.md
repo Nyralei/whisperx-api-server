@@ -11,6 +11,7 @@ A FastAPI server that exposes [WhisperX](https://github.com/m-bain/WhisperX) as 
 - **Live request status** — poll an in-flight transcription's current pipeline stage by request id, in both direct and Kafka modes
 - **Pluggable backends** — swap transcription, alignment, and diarization implementations per stage
 - **API key auth** — single key or a JSON key-map for multi-client setups
+- **Optional web UI** — a built-in browser client (upload, live stage progress, interactive transcript, exports), off by default
 
 ## Quick Start
 
@@ -70,6 +71,32 @@ docker compose -f compose-kafka.yaml --profile cpu-observe up
 | 7 | CUDA + Kafka + Observability | `cuda-observe` | `compose-kafka.yaml` |
 | 8 | CPU + Kafka + Observability | `cpu-observe` | `compose-kafka.yaml` |
 
+## Web UI (optional)
+
+A single-page browser client for the API lives in [`webui/`](webui/) (React + Vite + TypeScript + Tailwind). It is a thin client over the public endpoints — it adds no API routes and no Python dependencies, and the core API behaves identically whether it is enabled or not (covered by a test). Features: drag-and-drop upload with progress, all transcription form parameters, a live pipeline-stage timeline (client-generated `X-Request-ID` + status polling, working in both direct and Kafka modes), an interactive transcript with click-to-seek, word-level highlighting and color-coded speakers, export buttons for every response format, one-click re-run of the same file with adjusted parameters (the file stays loaded in the browser — no re-selection), links to the interactive API docs (Swagger UI / ReDoc), and a light/dark theme toggle (follows the OS by default).
+
+**Enable it** with `WEBUI__ENABLED=true`. The UI is then served at `/webui/` (with `/` redirecting to it); when the flag is off — the default — neither route exists. The server fails fast at startup if the flag is on but no build output is found.
+
+**Docker images** build the UI via an opt-in build arg (default `skip` — no bun stage runs, existing profiles build exactly as before):
+
+```bash
+# Standalone; same BUILD_WEBUI=build works for compose-kafka.yaml
+BUILD_WEBUI=build docker compose --profile cuda build
+# then run with WEBUI__ENABLED=true in .env
+docker compose --profile cuda up
+```
+
+**Without Docker**, build the assets once (Bun ≥ 1.3; no Bun process is needed at runtime):
+
+```bash
+cd webui && bun install --frozen-lockfile && bun run build
+WEBUI__ENABLED=true whisperx-api
+```
+
+The server looks for `webui/dist` relative to the working directory, then the repo root; point `WEBUI__DIST_DIR` at the build output for non-standard layouts. For UI development, `bun run dev` starts Vite on `:5173` and proxies API calls to `http://localhost:8000` (override with `WEBUI_DEV_API`). The frontend carries its own quality gates — `bun run lint` (Biome) and `bun run test` (Vitest) — which run in CI on every push.
+
+**Auth:** the static assets themselves are served without an API key (they contain nothing sensitive); every API call the UI makes carries the key the user enters. The UI probes `GET /info` on load — a 200 without credentials means no key is configured and the key field is hidden.
+
 ## Configuration
 
 All settings are environment variables. Nested fields use `__` as a delimiter (e.g. `WHISPER__MODEL=large-v3`).
@@ -87,6 +114,7 @@ All available settings are defined in [`config.py`](src/whisperx_api_server/conf
 | `AUTH_REQUIRED` | `false` | When `true`, refuse to start unless `API_KEY` or `API_KEYS_FILE` is set |
 | `MODE` | `direct` | `direct` or `kafka` |
 | `MAX_CONCURRENT_TRANSCRIPTIONS` | `1` | Max concurrent ML inferences (transcribe / align / diarize). `0` = unlimited. See the concurrency note below. |
+| `WEBUI__ENABLED` | `false` | Serve the bundled [web UI](#web-ui-optional) at `/webui` |
 
 > **`MAX_CONCURRENT_TRANSCRIPTIONS` parallelizes across *distinct* models, not within one.** Each transcription pipeline holds a per-model lock during the transcribe step, so two requests for the **same** model still run one at a time even with the limit raised — the setting lets a request for a *different* model (and the align / diarize stages) proceed concurrently. To raise same-model throughput, add GPUs or run more replicas / workers. Whichever process runs inference (the API in direct mode, the worker in Kafka mode) logs this caveat at startup when the limit is >1.
 
@@ -131,6 +159,8 @@ Transcribe an audio file. Compatible with the [OpenAI transcription API](https:/
 | `align` | bool | `true` | Enable word-level alignment (required for subtitle formats) |
 | `diarize` | bool | `false` | Enable speaker diarization (requires `align=true`) |
 | `speaker_embeddings` | bool | `false` | Include speaker embeddings in diarization output |
+| `min_speakers` | int | — | Lower bound on the speaker count for diarization (≥ 1) |
+| `max_speakers` | int | — | Upper bound on the speaker count for diarization (≥ `min_speakers`) |
 | `highlight_words` | bool | `false` | Highlight words in `vtt`/`srt` output |
 | `suppress_numerals` | bool | `true` | Spell out numbers |
 | `hotwords` | string | — | Comma-separated hotwords to bias toward |
@@ -219,6 +249,20 @@ Terminal states (`completed` / `failed`) are retained for `REQUEST_STATUS__TTL_S
 
 ---
 
+### `GET /v1/audio/transcriptions/{request_id}/events`
+
+Streams the processing status of a transcription request as Server-Sent Events. Each state change is emitted as a `data:` line carrying the status JSON — `status` (`queued` / `in_progress` / `completed` / `failed`), the active `stage`, the per-stage `stages[]` timeline, and `error` / `error_type` on failure. `: ping` comment lines are sent while idle to hold the connection open. The stream ends when the request reaches a terminal state, the client disconnects, or `REQUEST_STATUS__SSE_MAX_DURATION_SECONDS` elapses.
+
+The client sets a known `X-Request-ID` (matching `[A-Za-z0-9._-]{1,128}`) on the transcription POST and opens the stream alongside it:
+
+```bash
+curl -N http://localhost:8000/v1/audio/transcriptions/my-request-1/events
+```
+
+When auth is configured the endpoint requires the API key like every other route, so consume it with a header-capable client rather than a browser `EventSource`. A malformed id returns `400 Bad Request`; an unknown, expired, or not-yet-tracked id returns `404 Not Found`.
+
+---
+
 ### Async job submission (Kafka mode)
 
 By default the transcription POST is synchronous — the HTTP response arrives only when the whole pipeline finishes. In **Kafka mode** you can instead submit the job and return immediately by setting the `async` form field, then fetch the result later. This decouples slow transcriptions from the request connection (no client read-timeout to tune) and survives an API-replica restart, because the result is read from durable storage rather than an in-memory future.
@@ -248,7 +292,7 @@ Poll `status_url` (see above) to follow progress, then fetch `result_url` once `
 
 ### `GET /v1/audio/transcriptions/{request_id}/result`
 
-Fetch the final result of an async job (Kafka mode only). It reads the stored `results/{job_id}` envelope from S3, so it works from any replica and after restarts, with no in-memory state required.
+Fetch and (re-)format the final result of a finished transcription without re-running the pipeline. In **Kafka mode** it reads the stored `results/{job_id}` envelope from S3, so it works from any replica and after restarts. In **direct mode** it reads an on-disk result store written when the synchronous POST completes — enabled by default (`RESULT_STORE__ENABLED`), bounded by count and age, and best-effort (a temp dir, not shared across replicas or guaranteed across restarts).
 
 **Query parameters**
 
@@ -263,10 +307,10 @@ Formatting is applied at fetch time from these query parameters — the `respons
 
 - `200 OK` — formatted transcription (Content-Type per `response_format`), identical to what the synchronous POST would have returned
 - `400 Bad Request` — malformed `request_id`
-- `404 Not Found` — result not available (still pending, unknown, or expired); also returned in direct mode
+- `404 Not Found` — result not available (still pending, unknown, expired, or — in direct mode — never stored / result store disabled)
 - worker failures are replayed with the same status code the synchronous endpoint returns (e.g. invalid audio → `422`, timeout → `504`), not `404`
 
-Results are retained for `S3__OBJECT_EXPIRY_DAYS` (default 1 day) via the bucket lifecycle policy; after that the id 404s.
+Kafka-mode results are retained for `S3__OBJECT_EXPIRY_DAYS` (default 1 day) via the bucket lifecycle policy; direct-mode results for `RESULT_STORE__TTL_SECONDS` (default 1h), up to `RESULT_STORE__MAX_ENTRIES` files. After that the id 404s.
 
 ---
 
@@ -296,7 +340,7 @@ Format the `result` yourself, or ignore the body and fetch `result_url` for a fo
 
 ### `GET /info`
 
-Returns the running version, mode, uptime, concurrency / queue state, and (in Kafka mode) discovered worker membership. Add `?detail=full` for extended Kafka topology.
+Returns the running version, mode, uptime, concurrency / queue state, and (in Kafka mode) discovered worker membership. Also reports `max_upload_size_bytes` (`null` = unlimited) and `subtitle_formats_available` (whether this process can render `vtt`/`srt`/`aud`/`vtt_json`), so a client can pre-validate uploads and format support. Add `?detail=full` for extended Kafka topology.
 
 ---
 
@@ -310,6 +354,7 @@ Returns `{"status": "healthy"}`. Not protected by API key auth.
 
 | Endpoint | Description |
 |---|---|
+| `GET /models/catalog` | List known transcription model names + configured default (both modes) |
 | `GET /models/list` | List loaded transcription models |
 | `POST /models/load` | Load a model (`model` param) |
 | `POST /models/unload` | Unload a model (`model` param) |

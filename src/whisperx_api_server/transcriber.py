@@ -288,6 +288,8 @@ async def transcribe(
     align: bool = False,
     diarize: bool = False,
     speaker_embeddings: bool = False,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
     request_id: str = "",
     task: str = "transcribe",
     source_url: str | None = None,
@@ -465,6 +467,8 @@ async def transcribe(
                     audio=audio,
                     speaker_embeddings=speaker_embeddings,
                     request_id=request_id,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
                 )
                 profile["diarize"] = time.perf_counter() - t0
                 logger.debug(

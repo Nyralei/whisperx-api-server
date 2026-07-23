@@ -32,6 +32,15 @@ def update_options(kwargs, defaults):
     return options
 
 
+def subtitle_formats_supported() -> bool:
+    """True if this process can render srt/vtt/aud/vtt_json (whisperx importable)."""
+    try:
+        from whisperx.utils import WriteAudacity, WriteSRT, WriteVTT  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 def _get_whisperx_writer(writer_format: ResponseFormat):
     try:
         from whisperx.utils import WriteAudacity, WriteSRT, WriteVTT

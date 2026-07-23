@@ -23,6 +23,9 @@ from whisperx_api_server.config import DistributedMode
 from whisperx_api_server.dependencies import ApiKeyDependency, get_config
 from whisperx_api_server.logger import setup_logger
 from whisperx_api_server.routers.models import (
+    catalog_router as models_catalog_router,
+)
+from whisperx_api_server.routers.models import (
     router as models_router,
 )
 from whisperx_api_server.routers.observability import (
@@ -400,8 +403,15 @@ def create_app() -> FastAPI:
             "Kafka mode: /models/*, /align_models/*, /diarize_models/* endpoints "
             "are disabled (model lifecycle lives in worker processes)"
         )
+    # Static model catalog is available in both modes.
+    app.include_router(models_catalog_router, dependencies=dependencies)
     app.include_router(transcribe_router, dependencies=dependencies)
     app.include_router(status_router, dependencies=dependencies)
+
+    if config.webui.enabled:
+        from whisperx_api_server.webui import mount_webui
+
+        mount_webui(app, config)
 
     if config.allow_origins is not None:
         app.add_middleware(

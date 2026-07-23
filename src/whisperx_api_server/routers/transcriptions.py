@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, Response
 import whisperx_api_server.kafka_client as kafka_client
 import whisperx_api_server.s3_client as s3_client
 import whisperx_api_server.transcriber as transcriber
-from whisperx_api_server import request_status, webhook
+from whisperx_api_server import request_status, result_store, webhook
 from whisperx_api_server.config import (
     Config,
     DistributedMode,
@@ -194,6 +194,8 @@ async def transcribe_audio(
     align: Annotated[bool, Form()] = True,
     diarize: Annotated[bool, Form()] = False,
     speaker_embeddings: Annotated[bool, Form()] = False,
+    min_speakers: Annotated[int | None, Form()] = None,
+    max_speakers: Annotated[int | None, Form()] = None,
     chunk_size: Annotated[int | None, Form()] = None,
     batch_size: Annotated[int | None, Form()] = None,
     is_async: Annotated[bool, Form(alias="async")] = False,
@@ -296,6 +298,24 @@ async def transcribe_audio(
                 detail=detail,
             )
 
+    for name, value in (("min_speakers", min_speakers), ("max_speakers", max_speakers)):
+        if value is not None and value < 1:
+            detail = f"{name} must be >= 1."
+            request_status.mark_failed(request_id, detail, "HTTPException")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail
+            )
+    if (
+        min_speakers is not None
+        and max_speakers is not None
+        and min_speakers > max_speakers
+    ):
+        detail = "min_speakers cannot exceed max_speakers."
+        request_status.mark_failed(request_id, detail, "HTTPException")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail
+        )
+
     word_timestamps = "word" in timestamp_granularities
 
     asr_options = {
@@ -315,6 +335,8 @@ async def transcribe_audio(
                 "align": align,
                 "diarize": diarize,
                 "speaker_embeddings": speaker_embeddings,
+                "min_speakers": min_speakers,
+                "max_speakers": max_speakers,
                 "batch_size": batch_size,
                 "chunk_size": chunk_size,
                 "asr_options": asr_options,
@@ -355,6 +377,8 @@ async def transcribe_audio(
                 align=align,
                 diarize=diarize,
                 speaker_embeddings=speaker_embeddings,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
                 chunk_size=chunk_size,
                 request_id=request_id,
             )
@@ -375,6 +399,9 @@ async def transcribe_audio(
         _schedule_completion_webhook(
             background_tasks, config, request_id, transcription, callback_url
         )
+
+    if config.mode != DistributedMode.KAFKA:
+        result_store.put(request_id, transcription)
 
     return format_transcription(
         transcription, response_format, highlight_words=highlight_words
@@ -514,10 +541,12 @@ async def translate_audio(
 @router.get(
     "/v1/audio/transcriptions/{request_id}/result",
     description=(
-        "Fetch the final result of an async transcription job from durable "
-        "storage (Kafka mode). 404 while pending/unknown/expired; the mapped "
-        "error response for a failed job; the formatted transcription on success. "
-        "Availability is bounded by S3__OBJECT_EXPIRY_DAYS."
+        "Fetch and (re-)format the final result of a finished transcription job. "
+        "Kafka mode reads the durable S3 envelope (availability bounded by "
+        "S3__OBJECT_EXPIRY_DAYS); direct mode reads the on-disk result store "
+        "(bounded by RESULT_STORE__TTL_SECONDS / MAX_ENTRIES, and returns 404 when "
+        "RESULT_STORE__ENABLED is false). 404 while pending/unknown/expired; the "
+        "mapped error response for a failed job; the formatted transcription on success."
     ),
     tags=["Transcription"],
 )
@@ -532,13 +561,19 @@ async def get_transcription_result(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid request_id format.",
         )
-    if config.mode != DistributedMode.KAFKA:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Stored results are only available in Kafka mode.",
-        )
     if response_format is None:
         response_format = config.default_response_format
+
+    if config.mode != DistributedMode.KAFKA:
+        stored = result_store.get(request_id)
+        if stored is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Result not available (not stored, expired, or result store disabled).",
+            )
+        return format_transcription(
+            stored, response_format, highlight_words=highlight_words
+        )
 
     raw = await s3_client.get_result(request_id)
     if raw is None:

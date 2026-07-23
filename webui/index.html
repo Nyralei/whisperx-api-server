@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Apply the saved (or OS) theme before first paint to avoid a flash.
+      (function () {
+        try {
+          var t = localStorage.getItem("whisperx-webui-theme");
+          if (t !== "light" && t !== "dark") {
+            t = window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          document.documentElement.classList.toggle("dark", t === "dark");
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {}
+      })();
+    </script>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%2322d3ee'/%3E%3Cg stroke='%2306232b' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M8 13v6'/%3E%3Cpath d='M13 9v14'/%3E%3Cpath d='M18 12v8'/%3E%3Cpath d='M24 14v4'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <title>WhisperX — Transcription</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

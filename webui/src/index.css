@@ -1,0 +1,192 @@
+@import "tailwindcss";
+
+/* Manual toggle instead of Tailwind v4's default prefers-color-scheme: the
+   `dark:` variant activates whenever an ancestor carries the `.dark` class. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, Menlo, monospace;
+
+  /* Terminal look: hairline-boxy corners across the whole radius scale. */
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+}
+
+/* Semantic color roles — a single source of truth for the theme. Components use
+   the role utilities (bg-surface, text-fg, bg-accent, …); the raw values below
+   flip under `html.dark`, so no per-element `dark:` variant is needed. Palette is
+   a slate near-black neutral ramp with a single cyan accent (a muted green stays
+   for success). Light-mode cyan is darkened so text/fills keep WCAG AA. */
+:root {
+  --canvas: #f4f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef1f4;
+  --fill: #e3e8ec;
+  --border: #dbe1e6;
+  --border-strong: #c4ccd3;
+  --fg: #0f141a;
+  --fg-muted: #47525b;
+  --fg-subtle: #626d76; /* AA (~4.6:1) on surface/canvas */
+
+  --accent: #0e7490; /* cyan-700 fill — white text clears AA */
+  --accent-strong: #155e75; /* cyan-800 hover */
+  --on-accent: #ffffff;
+  --accent-text: #0e7490; /* links/icons — AA on surface */
+  --accent-subtle: #ecfeff; /* cyan-50 active bg */
+
+  --success: #059669; /* emerald-600 */
+  --success-subtle: #ecfdf5;
+
+  --danger-text: #dc2626; /* red-600 */
+  --danger-strong: #991b1b; /* red-800 */
+  --danger-bg: #fef2f2; /* red-50  */
+  --danger-border: #fecaca; /* red-200 */
+
+  --warn-text: #b45309; /* amber-700 — AA on surface/canvas */
+  --warn-strong: #92400e; /* amber-800 */
+  --warn-bg: #fffbeb; /* amber-50  */
+  --warn-border: #fde68a; /* amber-200 */
+
+  --focus: #0891b2; /* cyan-600 ring */
+}
+
+html.dark {
+  --canvas: #0a0e12;
+  --surface: #0f141a;
+  --surface-2: #151b22;
+  --fill: #1c242d;
+  --border: #1e2730;
+  --border-strong: #2b3742;
+  --fg: #d7e0e8;
+  --fg-muted: #93a1ad;
+  --fg-subtle: #7c8894; /* AA (~4.7:1) on dark surface */
+
+  --accent: #22d3ee; /* cyan-400 */
+  --accent-strong: #06b6d4; /* cyan-500 hover */
+  --on-accent: #06232b; /* dark ink on bright cyan */
+  --accent-text: #22d3ee;
+  --accent-subtle: #0e3a4466; /* cyan tint / 40% */
+
+  --success: #34d399; /* emerald-400 */
+  --success-subtle: #064e3b66;
+
+  --danger-text: #f87171; /* red-400 */
+  --danger-strong: #fca5a5; /* red-300 */
+  --danger-bg: #450a0a66; /* red-950 / 40% */
+  --danger-border: #7f1d1d99; /* red-900 / 60% */
+
+  --warn-text: #fbbf24; /* amber-400 */
+  --warn-strong: #fcd34d; /* amber-300 */
+  --warn-bg: #451a0366; /* amber-950 / 40% */
+  --warn-border: #78350f99; /* amber-900 / 60% */
+
+  --focus: #22d3ee;
+}
+
+/* Register the roles as Tailwind color utilities. `inline` keeps them as
+   var() references so they resolve per-cascade (and flip under .dark). */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fill: var(--fill);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-on-accent: var(--on-accent);
+  --color-accent-text: var(--accent-text);
+  --color-accent-subtle: var(--accent-subtle);
+
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+
+  --color-danger-text: var(--danger-text);
+  --color-danger-strong: var(--danger-strong);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-border: var(--danger-border);
+
+  --color-warn-text: var(--warn-text);
+  --color-warn-strong: var(--warn-strong);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-border: var(--warn-border);
+
+  --color-focus: var(--focus);
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+/* Sans-serif throughout; code/pre inherit it rather than the UA monospace. */
+body {
+  background-color: var(--color-canvas);
+  font-family: var(--font-sans);
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: inherit;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Thin, tinted scrollbar for scrollable panels (e.g. long transcripts). */
+.term-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Blinking block cursor used in the header and empty states. */
+.term-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.05em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: term-blink 1.1s steps(1) infinite;
+}
+@keyframes term-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Skip layout/paint for off-screen transcript rows so very long transcripts stay
+   cheap to render — the browser reserves the estimated height until each row
+   scrolls into view (dependency-free alternative to list virtualization). */
+.segment-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2.75rem;
+}
+
+/* Respect the OS "reduce motion" preference for the app's looping animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

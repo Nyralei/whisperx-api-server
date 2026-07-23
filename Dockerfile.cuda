@@ -1,6 +1,23 @@
 ARG UBUNTU_VERSION=24.04
 ARG CUDA_VERSION=12.8.1
 ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION}
+# Optional web UI: BUILD_WEBUI=build compiles webui/ in a bun stage; the default
+# (skip) never pulls bun and ships an empty webui/dist. Named distinctly from the
+# runtime WEBUI__* config so this build arg can't collide with the `webui` config field.
+ARG BUILD_WEBUI=skip
+
+FROM oven/bun:1.3-alpine AS webui-build
+WORKDIR /webui
+COPY webui/package.json webui/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY webui/ ./
+RUN bun run build
+
+FROM ${BASE_IMAGE} AS webui-skip
+RUN mkdir -p /webui/dist
+
+FROM webui-${BUILD_WEBUI} AS webui
+
 FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.source="https://github.com/nyralei/whisperx-api-server"
@@ -35,6 +52,9 @@ COPY --chown=ubuntu src/whisperx_api_server ./src/whisperx_api_server
 RUN uv pip install --no-deps .
 # Fails the build if the wheel was built empty (src-layout packaging regression).
 RUN python -c "import whisperx_api_server.main"
+
+# Empty unless built with --build-arg BUILD_WEBUI=build; served only when WEBUI__ENABLED=true.
+COPY --chown=ubuntu --from=webui /webui/dist ./webui/dist
 COPY --chown=ubuntu cuda-docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 

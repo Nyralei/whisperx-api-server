@@ -11,3 +11,6 @@ whisperx/torch-home
 whisperx/test-files
 Dockerfile*
 .scannerwork
+.venv
+webui/node_modules
+webui/dist

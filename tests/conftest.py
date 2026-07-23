@@ -1,28 +1,46 @@
 import io
+import os
+import tempfile
 import wave
 
 import httpx
 import numpy as np
 import pytest
 
-from fake_backends import fake_transcription, register_fake_backends
+from fake_backends import fake_diarization, fake_transcription, register_fake_backends
 from whisperx_api_server import request_status
 from whisperx_api_server.dependencies import get_config
 
 register_fake_backends()
+
+_RESULT_STORE_DIR = tempfile.mkdtemp(prefix="whisperx-test-results-")
 
 TEST_ENV_DEFAULTS = {
     "MODE": "direct",
     "BACKENDS__TRANSCRIPTION": "fake",
     "BACKENDS__ALIGNMENT": "fake",
     "BACKENDS__DIARIZATION": "fake",
+    "RESULT_STORE__DIR": _RESULT_STORE_DIR,
 }
+
+
+def _clear_result_store_dir() -> None:
+    try:
+        for name in os.listdir(_RESULT_STORE_DIR):
+            if name.endswith(".json"):
+                os.remove(os.path.join(_RESULT_STORE_DIR, name))
+    except OSError:
+        pass
+
+
 CONFIG_ENV_KEYS = (
     "API_KEY",
     "API_KEYS_FILE",
     "AUTH_REQUIRED",
     "METRICS_ENABLED",
     "METRICS__ENABLED",
+    "WEBUI__ENABLED",
+    "WEBUI__DIST_DIR",
 )
 
 
@@ -36,8 +54,11 @@ def reset_state():
     request_status._reset_for_tests()
     fake_transcription.calls.clear()
     fake_transcription.raise_exc = None
+    fake_diarization.calls.clear()
+    _clear_result_store_dir()
     yield
     request_status._reset_for_tests()
+    _clear_result_store_dir()
     get_config.cache_clear()
 
 

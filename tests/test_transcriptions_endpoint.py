@@ -230,6 +230,40 @@ async def test_callback_url_ssrf_rejected_422(make_app, monkeypatch):
     assert "callback_url" in resp.json()["detail"].lower()
 
 
+async def test_min_max_speakers_forwarded_to_transcribe(make_app, monkeypatch):
+    record: dict = {}
+    _patch_transcribe(monkeypatch, returns=dict(CANNED), record=record)
+    async with _client(make_app()) as c:
+        resp = await _post(
+            c,
+            audio_url="http://example.com/a.wav",
+            response_format="json",
+            diarize="true",
+            min_speakers="2",
+            max_speakers="4",
+        )
+    assert resp.status_code == 200, resp.text
+    assert record["min_speakers"] == 2
+    assert record["max_speakers"] == 4
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"min_speakers": "0"},
+        {"max_speakers": "0"},
+        {"min_speakers": "3", "max_speakers": "2"},
+    ],
+)
+async def test_invalid_speaker_bounds_422(make_app, monkeypatch, params):
+    _patch_transcribe(monkeypatch, returns=dict(CANNED))
+    async with _client(make_app()) as c:
+        resp = await _post(
+            c, audio_url="http://example.com/a.wav", align="false", **params
+        )
+    assert resp.status_code == 422, resp.text
+
+
 def test_json_canned_is_serializable():
     # Guards against an accidentally non-JSON canned payload in this module.
     json.dumps(CANNED)

@@ -324,6 +324,8 @@ class WhisperXDiarizationBackend:
         audio: np.ndarray,
         speaker_embeddings: bool,
         request_id: str,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
     ) -> dict[str, Any]:
         if "segments" not in result:
             raise ValueError(
@@ -345,11 +347,19 @@ class WhisperXDiarizationBackend:
             time.perf_counter() - diarization_model_start,
         )
 
+        speaker_bounds: dict[str, int] = {}
+        if min_speakers is not None:
+            speaker_bounds["min_speakers"] = min_speakers
+        if max_speakers is not None:
+            speaker_bounds["max_speakers"] = max_speakers
+
         def _run_diarization() -> tuple[Any, Any]:
             with torch.inference_mode():
                 if speaker_embeddings:
-                    return diarize_model(audio=audio, return_embeddings=True)
-                return diarize_model(audio=audio), None
+                    return diarize_model(
+                        audio=audio, return_embeddings=True, **speaker_bounds
+                    )
+                return diarize_model(audio=audio, **speaker_bounds), None
 
         # Refcount so concurrent /diarize_models/unload sees this is in use.
         acquire_diarize_pipeline(config.diarization.model)

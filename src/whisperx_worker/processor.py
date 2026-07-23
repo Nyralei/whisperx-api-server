@@ -224,6 +224,8 @@ async def process_job(
                     audio=audio,
                     speaker_embeddings=params.get("speaker_embeddings", False),
                     request_id=job_id,
+                    min_speakers=params.get("min_speakers"),
+                    max_speakers=params.get("max_speakers"),
                 )
                 profile["diarize"] = time.perf_counter() - t0
                 logger.debug(

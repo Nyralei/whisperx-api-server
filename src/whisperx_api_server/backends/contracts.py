@@ -76,4 +76,6 @@ class DiarizationBackend(Protocol):
         audio: np.ndarray,
         speaker_embeddings: bool,
         request_id: str,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
     ) -> dict[str, Any]: ...

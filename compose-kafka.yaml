@@ -17,6 +17,7 @@ x-api-base: &api-base
     dockerfile: Dockerfile.cpu
     args:
       UV_EXTRA_ARGS: "--extra kafka"
+      BUILD_WEBUI: ${BUILD_WEBUI:-skip}
   env_file:
     - .env
   depends_on:
@@ -178,6 +179,7 @@ services:
       dockerfile: Dockerfile.cpu
       args:
         UV_EXTRA_ARGS: "--extra kafka --extra metrics"
+        BUILD_WEBUI: ${BUILD_WEBUI:-skip}
     environment:
       <<: *api-env
       METRICS_ENABLED: "true"

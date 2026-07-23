@@ -13,13 +13,81 @@ from whisperx_api_server.backends.registry import (
     resolve_stage_backends,
 )
 from whisperx_api_server.config import (
+    DistributedMode,
     Language,
     MediaType,
 )
+from whisperx_api_server.dependencies import get_config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+catalog_router = APIRouter()
+
+# Fallback for a slim install without faster-whisper; the live list is preferred
+# via faster_whisper.available_models(). Mirrors faster-whisper 1.2.x.
+KNOWN_TRANSCRIPTION_MODELS = (
+    "tiny.en",
+    "tiny",
+    "base.en",
+    "base",
+    "small.en",
+    "small",
+    "medium.en",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large",
+    "distil-large-v2",
+    "distil-medium.en",
+    "distil-small.en",
+    "distil-large-v3",
+    "distil-large-v3.5",
+    "large-v3-turbo",
+    "turbo",
+)
+
+
+def _known_models() -> list[str]:
+    try:
+        from faster_whisper import available_models
+
+        return list(available_models())
+    except Exception:
+        return list(KNOWN_TRANSCRIPTION_MODELS)
+
+
+@catalog_router.get(
+    "/models/catalog",
+    description=(
+        "Curated catalog of known transcription model names plus the configured "
+        "default. In direct mode `loaded` lists models currently in this process's "
+        "cache; in Kafka mode `loaded` is null (models live in worker processes). "
+        "Available in both modes, unlike /models/list."
+    ),
+    tags=["models", "transcribe"],
+)
+def models_catalog():
+    config = get_config()
+    loaded: list[str] | None = None
+    if config.mode != DistributedMode.KAFKA:
+        try:
+            selected_backends = resolve_stage_backends()
+            loaded = get_transcription_backend(
+                selected_backends.transcription
+            ).list_loaded_models()
+        except Exception:
+            logger.warning("models_catalog: loaded-model enumeration failed")
+            loaded = None
+    return JSONResponse(
+        content={
+            "models": _known_models(),
+            "default": config.whisper.model,
+            "loaded": loaded,
+        },
+        media_type=MediaType.APPLICATION_JSON,
+    )
 
 
 def handle_default_openai_model(model_name: str) -> str:

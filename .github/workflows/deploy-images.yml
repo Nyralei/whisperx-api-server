@@ -17,27 +17,37 @@ jobs:
           - target: cpu
             file: ./Dockerfile.cpu
             image: whisperx-api-server
-            build_args: ""
+            build_args: |
+              BUILD_WEBUI=build
+              UV_EXTRA_ARGS=--extra metrics
           - target: cuda
             file: ./Dockerfile.cuda
             image: whisperx-api-server
-            build_args: ""
+            build_args: |
+              BUILD_WEBUI=build
+              UV_EXTRA_ARGS=--extra metrics
           - target: cpu-kafka
             file: ./Dockerfile.cpu
             image: whisperx-api-server
-            build_args: "UV_EXTRA_ARGS=--extra kafka"
+            build_args: |
+              BUILD_WEBUI=build
+              UV_EXTRA_ARGS=--extra kafka --extra metrics
           - target: cuda-kafka
             file: ./Dockerfile.cuda
             image: whisperx-api-server
-            build_args: "UV_EXTRA_ARGS=--extra kafka"
+            build_args: |
+              BUILD_WEBUI=build
+              UV_EXTRA_ARGS=--extra kafka --extra metrics
           - target: worker-cpu
             file: ./Dockerfile.worker-cpu
             image: whisperx-worker
-            build_args: ""
+            build_args: |
+              UV_EXTRA_ARGS=--extra metrics
           - target: worker-cuda
             file: ./Dockerfile.worker-cuda
             image: whisperx-worker
-            build_args: ""
+            build_args: |
+              UV_EXTRA_ARGS=--extra metrics
 
     steps:
     - name: Checkout code

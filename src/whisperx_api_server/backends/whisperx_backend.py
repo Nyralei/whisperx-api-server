@@ -13,6 +13,7 @@ from whisperx import diarize as whisperx_diarize
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.executors import get_io_executor, get_model_executor
+from whisperx_api_server.observability import pipeline as _pipe
 
 from .registry import (
     register_alignment_backend,
@@ -341,10 +342,12 @@ class WhisperXDiarizationBackend:
             config.diarization.model,
         )
         diarize_model = await load_diarize_pipeline(model_name=config.diarization.model)
+        load_elapsed = time.perf_counter() - diarization_model_start
+        _pipe.stage_duration.labels(stage="diarize_load").observe(load_elapsed)
         logger.info(
             "Request ID: %s - Diarization model loaded in %.2f seconds",
             request_id,
-            time.perf_counter() - diarization_model_start,
+            load_elapsed,
         )
 
         speaker_bounds: dict[str, int] = {}
@@ -371,6 +374,9 @@ class WhisperXDiarizationBackend:
                 )
         finally:
             release_diarize_pipeline(config.diarization.model)
+        _pipe.stage_duration.labels(stage="diarize_infer").observe(
+            time.perf_counter() - diarize_start
+        )
 
         # whisperx alignment stores its output as a dict ({"segments": [...],
         # "word_segments": [...]}) under result["segments"]; a passthrough/native aligner
@@ -381,6 +387,7 @@ class WhisperXDiarizationBackend:
         if not isinstance(transcript, dict):
             transcript = {"segments": transcript}
         # Lock released before CPU-only word assignment so the diarize slot is free sooner.
+        assign_start = time.perf_counter()
         result["segments"] = await loop.run_in_executor(
             get_io_executor(),
             lambda: whisperx_diarize.assign_word_speakers(
@@ -388,6 +395,9 @@ class WhisperXDiarizationBackend:
                 transcript,
                 embeddings,
             ),
+        )
+        _pipe.stage_duration.labels(stage="diarize_assign").observe(
+            time.perf_counter() - assign_start
         )
         logger.info(
             "Request ID: %s - Diarization completed using backend=whisperx in %.2f seconds",

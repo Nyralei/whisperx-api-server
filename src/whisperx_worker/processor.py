@@ -18,6 +18,7 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.observability import pipeline as _pipe
 from whisperx_api_server.transcriber import (
     _cleanup_cache_only,
     _finalize_text,
@@ -231,6 +232,12 @@ async def process_job(
                 logger.debug(
                     "Job %s: diarization took %.2f seconds", job_id, profile["diarize"]
                 )
+                _pipe.stage_duration.labels(stage="diarize").observe(profile["diarize"])
+                audio_seconds = len(audio) / 16000.0 if audio is not None else 0.0
+                if audio_seconds > 0:
+                    _pipe.realtime_factor.labels(
+                        model=model_name, stage="diarize"
+                    ).observe(profile["diarize"] / audio_seconds)
 
             await _progress("finalize")
             t0 = time.perf_counter()

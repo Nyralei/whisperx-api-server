@@ -201,7 +201,14 @@ async def process_job(
                 "Job %s: transcription took %.2f seconds", job_id, profile["transcribe"]
             )
 
-            if align or diarize:
+            has_segments = bool(result.get("segments"))
+            if (align or diarize) and not has_segments:
+                logger.info(
+                    "Job %s: transcription produced no speech; skipping align/diarize",
+                    job_id,
+                )
+
+            if (align or diarize) and has_segments:
                 if alignment_backend is None:
                     raise RuntimeError(
                         "Alignment backend is not initialized but alignment or diarization was requested"
@@ -216,7 +223,7 @@ async def process_job(
                     "Job %s: alignment took %.2f seconds", job_id, profile["align"]
                 )
 
-            if diarize:
+            if diarize and has_segments:
                 assert diarization_backend is not None
                 await _progress("diarize")
                 t0 = time.perf_counter()

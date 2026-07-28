@@ -435,7 +435,14 @@ async def transcribe(
                     model=model_name, stage="transcribe"
                 ).observe(profile["transcribe"] / audio_duration_seconds)
 
-            if align or diarize:
+            has_segments = bool(result.get("segments"))
+            if (align or diarize) and not has_segments:
+                logger.info(
+                    "Request ID: %s - Transcription produced no speech; skipping align/diarize",
+                    request_id,
+                )
+
+            if (align or diarize) and has_segments:
                 if alignment_stage_backend is None:
                     raise RuntimeError("Alignment backend is not initialized.")
                 request_status.set_stage(request_id, "align")
@@ -457,7 +464,7 @@ async def transcribe(
                         model=model_name, stage="align"
                     ).observe(profile["align"] / audio_duration_seconds)
 
-            if diarize:
+            if diarize and has_segments:
                 if diarization_stage_backend is None:
                     raise RuntimeError("Diarization backend is not initialized.")
                 request_status.set_stage(request_id, "diarize")

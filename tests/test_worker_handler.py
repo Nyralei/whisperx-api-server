@@ -165,7 +165,7 @@ async def test_success_writes_result_before_reply_then_commits(harness, monkeypa
     sends = _reply_sends(harness)
     assert len(sends) == 1
     # Stored envelope is byte-identical to the reply payload.
-    assert sends[0].value.decode() == harness.s3.results["j1"]
+    assert sends[0].value == harness.s3.results["j1"]
     assert json.loads(sends[0].value)["status"] == "ok"
 
     kinds = [step[0] for step in harness.order]

@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import math
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -290,6 +292,31 @@ class WhisperXAlignmentBackend:
         return result
 
 
+def _drop_unusable_embeddings(
+    embeddings: Mapping[str, list[float] | None] | None, request_id: str
+) -> dict[str, list[float] | None] | None:
+    """pyannote masks overlapping frames before embedding a speaker, so a speaker
+    with no clean frame in any chunk gets a centroid averaged over nothing: an
+    all-NaN vector. Report that speaker as null rather than 256 nulls."""
+    if embeddings is None:
+        return None
+    usable: dict[str, list[float] | None] = {}
+    unusable = []
+    for speaker, vector in embeddings.items():
+        if vector is not None and all(map(math.isfinite, vector)):
+            usable[speaker] = vector
+        else:
+            usable[speaker] = None
+            unusable.append(speaker)
+    if unusable:
+        logger.warning(
+            "Request ID: %s - Diarization produced no usable speaker embedding for %s",
+            request_id,
+            ", ".join(sorted(unusable)),
+        )
+    return usable
+
+
 class WhisperXDiarizationBackend:
     async def preload_default(self) -> None:
         config = get_config()
@@ -377,6 +404,7 @@ class WhisperXDiarizationBackend:
         _pipe.stage_duration.labels(stage="diarize_infer").observe(
             time.perf_counter() - diarize_start
         )
+        embeddings = _drop_unusable_embeddings(embeddings, request_id)
 
         # whisperx alignment stores its output as a dict ({"segments": [...],
         # "word_segments": [...]}) under result["segments"]; a passthrough/native aligner

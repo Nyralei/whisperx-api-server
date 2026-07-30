@@ -1,11 +1,10 @@
 import contextlib
-import json
 import logging
 import os
 import time
 from typing import Any
 
-import numpy as np
+import orjson
 
 import whisperx_api_server.s3_client as s3_client
 from whisperx_api_server import url_fetch
@@ -18,6 +17,7 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.formatters import ORJSON_OPTIONS
 from whisperx_api_server.observability import pipeline as _pipe
 from whisperx_api_server.transcriber import (
     _cleanup_cache_only,
@@ -31,19 +31,8 @@ from whisperx_worker.progress import publish_stage
 logger = logging.getLogger(__name__)
 
 
-class _NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super().default(obj)
-
-
-def serialize_result(result: dict) -> str:
-    return json.dumps(result, cls=_NumpyEncoder)
+def serialize_result(result: dict) -> bytes:
+    return orjson.dumps(result, option=ORJSON_OPTIONS)
 
 
 async def process_job(

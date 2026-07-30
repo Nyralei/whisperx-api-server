@@ -1,6 +1,18 @@
-from fastapi.responses import JSONResponse, Response
+from typing import Any
+
+import orjson
+from fastapi.responses import Response
 
 from whisperx_api_server.config import MediaType, ResponseFormat
+
+ORJSON_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS
+
+
+def json_response(payload: Any) -> Response:
+    return Response(
+        content=orjson.dumps(payload, option=ORJSON_OPTIONS),
+        media_type=MediaType.APPLICATION_JSON,
+    )
 
 
 class ListWriter:
@@ -106,15 +118,12 @@ def format_transcription(transcript, format, **kwargs) -> Response:
     options = update_options(kwargs, defaults)
 
     if format == "json":
-        response_data = {"text": transcript.get("text", "")}
-        return JSONResponse(
-            content=response_data, media_type=MediaType.APPLICATION_JSON
-        )
+        return json_response({"text": transcript.get("text", "")})
     elif format == "verbose_json":
-        return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
+        return json_response(transcript)
     elif format == "vtt_json":
         transcript["vtt_text"] = handle_whisperx_format(transcript, format, options)
-        return JSONResponse(content=transcript, media_type=MediaType.APPLICATION_JSON)
+        return json_response(transcript)
     elif format == "text":
         return Response(
             content=transcript.get("text", ""), media_type=MediaType.TEXT_PLAIN

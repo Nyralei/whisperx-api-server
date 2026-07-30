@@ -63,7 +63,7 @@ async def _delete_claim(ctx: WorkerContext, job_id: str) -> None:
 
 
 async def _deliver_callback(
-    event: dict, ctx: WorkerContext, job_id: str, envelope: str
+    event: dict, ctx: WorkerContext, job_id: str, envelope: bytes
 ) -> None:
     """Fire the completion webhook for a freshly-produced envelope, best-effort.
 
@@ -101,7 +101,7 @@ async def _route_to_dlq(event: dict, ctx: WorkerContext, attempts: int) -> None:
     await ctx.producer.send_and_wait(
         kafka_cfg.dead_letter_topic,
         key=job_id.encode(),
-        value=serialize_result(dlq_event).encode(),
+        value=serialize_result(dlq_event),
     )
     reply = {
         "job_id": job_id,
@@ -115,7 +115,7 @@ async def _route_to_dlq(event: dict, ctx: WorkerContext, attempts: int) -> None:
     envelope = serialize_result(reply)
     await ctx.s3.put_result(job_id, envelope)
     await ctx.producer.send_and_wait(
-        kafka_cfg.reply_topic, key=job_id.encode(), value=envelope.encode()
+        kafka_cfg.reply_topic, key=job_id.encode(), value=envelope
     )
     await _publish_terminal(ctx, job_id, reply)
     await _deliver_callback(event, ctx, job_id, envelope)
@@ -255,7 +255,7 @@ async def handle_message(event: dict, ctx: WorkerContext) -> None:
         await ctx.s3.put_result(job_id, envelope)
         await _publish_terminal(ctx, job_id, reply)
         await ctx.producer.send_and_wait(
-            kafka_cfg.reply_topic, key=job_id.encode(), value=envelope.encode()
+            kafka_cfg.reply_topic, key=job_id.encode(), value=envelope
         )
         logger.info("Job %s: reply published to %s", job_id, kafka_cfg.reply_topic)
 

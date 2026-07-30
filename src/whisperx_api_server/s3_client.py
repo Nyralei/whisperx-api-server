@@ -190,14 +190,14 @@ def _is_not_found(exc: Exception) -> bool:
     )
 
 
-async def put_result(job_id: str, envelope: str) -> None:
+async def put_result(job_id: str, envelope: bytes) -> None:
     """Store the terminal reply envelope so a redelivery can resend it."""
     if _client is None or _config is None:
         raise RuntimeError("S3 client not initialized")
     await _client.put_object(
         Bucket=_config.bucket,
         Key=f"{_RESULTS_PREFIX}{job_id}",
-        Body=envelope.encode(),
+        Body=envelope,
     )
 
 

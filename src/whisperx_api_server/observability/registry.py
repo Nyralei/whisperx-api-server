@@ -1,7 +1,6 @@
 """Per-app Prometheus CollectorRegistry and setup_metrics() entry point.
 
-Follows the module-level singleton pattern from kafka_client.py and s3_client.py:
-the `_registry` global is None by default; `setup_metrics()` imports
+The `_registry` global is None by default; `setup_metrics()` imports
 prometheus_client and creates a per-app CollectorRegistry.
 """
 
@@ -28,8 +27,7 @@ def _setup_http_instruments(registry: "CollectorRegistry") -> None:
 
     The four singletons in observability/http.py (requests_total,
     request_duration, requests_in_flight, errors_total) are replaced by
-    direct attribute assignment on the imported module object, mirroring
-    the kafka_client._client / s3_client._client pattern.
+    direct attribute assignment on the imported module object.
     """
     from prometheus_client import Counter, Gauge, Histogram
 

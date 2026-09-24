@@ -27,13 +27,17 @@ logger = logging.getLogger(__name__)
 @dataclass
 class WorkerReadiness:
     models_loaded: asyncio.Event = field(default_factory=asyncio.Event)
-    s3_initialized: asyncio.Event = field(default_factory=asyncio.Event)
+    storage_initialized: asyncio.Event = field(default_factory=asyncio.Event)
     kafka_subscribed: asyncio.Event = field(default_factory=asyncio.Event)
 
     def is_ready(self) -> bool:
         return all(
             e.is_set()
-            for e in (self.models_loaded, self.s3_initialized, self.kafka_subscribed)
+            for e in (
+                self.models_loaded,
+                self.storage_initialized,
+                self.kafka_subscribed,
+            )
         )
 
     def pending(self) -> list[str]:
@@ -41,7 +45,7 @@ class WorkerReadiness:
             name
             for name, e in (
                 ("models_loaded", self.models_loaded),
-                ("s3_initialized", self.s3_initialized),
+                ("storage_initialized", self.storage_initialized),
                 ("kafka_subscribed", self.kafka_subscribed),
             )
             if not e.is_set()

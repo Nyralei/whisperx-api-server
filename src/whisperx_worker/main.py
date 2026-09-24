@@ -5,7 +5,6 @@ import os
 import signal
 import socket
 
-import whisperx_api_server.s3_client as s3_client
 from whisperx_api_server.backends.registry import (
     get_alignment_backend,
     get_diarization_backend,
@@ -14,6 +13,7 @@ from whisperx_api_server.backends.registry import (
 )
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.logger import setup_logger
+from whisperx_api_server.storage import service as storage
 from whisperx_worker.handler import WorkerContext, commit_safely, consume_loop
 from whisperx_worker.health_server import WorkerReadiness, start_health_server
 
@@ -27,7 +27,7 @@ async def run_worker() -> None:
     setup_logger(config.log_level)
 
     # Start the health server before any heavy init so probes can hit /healthcheck
-    # immediately and /ready reports the unmet gates (models_loaded, s3_initialized,
+    # immediately and /ready reports the unmet gates (models_loaded, storage_initialized,
     # kafka_subscribed) while the worker is still coming up.
     readiness = WorkerReadiness()
     health_runner = await start_health_server(readiness, config.worker_health_port)
@@ -100,8 +100,8 @@ async def run_worker() -> None:
             "Worker SIGTERM handler unavailable on this platform (likely Windows)"
         )
 
-    await s3_client.init_client(config.s3)
-    readiness.s3_initialized.set()
+    await storage.init_storage(config)
+    readiness.storage_initialized.set()
 
     selected_backends = resolve_stage_backends()
     logger.info(
@@ -210,7 +210,7 @@ async def run_worker() -> None:
             logger.info("Worker GPU metrics poller stopped")
         await consumer.stop()
         await producer.stop()
-        await s3_client.close_client()
+        await storage.close_storage()
         with contextlib.suppress(Exception):
             await health_runner.cleanup()
         logger.info("Worker shut down")

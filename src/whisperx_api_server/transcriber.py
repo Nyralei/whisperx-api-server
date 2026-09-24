@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     import numpy as np
 
 import whisperx_api_server.kafka_client as kafka_client
-import whisperx_api_server.s3_client as s3_client
 from whisperx_api_server import request_status
 from whisperx_api_server.backends.registry import (
     get_alignment_backend,
@@ -33,6 +32,7 @@ from whisperx_api_server.config import (
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.observability import kafka as _kafka
 from whisperx_api_server.observability import pipeline as _pipe
+from whisperx_api_server.storage import service as storage
 
 logger = logging.getLogger(__name__)
 
@@ -572,16 +572,16 @@ async def _submit_kafka_job(
         safe_name = url_fetch.filename_from_url(source_url)
         s3_key: str | None = None
         logger.info(
-            "Request ID: %s - Forwarding source URL to worker (skipping S3 upload)",
+            "Request ID: %s - Forwarding source URL to worker (skipping upload)",
             request_id,
         )
     else:
         assert audio_file is not None  # exactly one of audio_file/source_url
         safe_name = _safe_filename(audio_file.filename)
-        request_status.set_stage(request_id, "uploading_to_s3")
-        logger.info("Request ID: %s - Uploading audio to S3", request_id)
+        request_status.set_stage(request_id, "uploading_audio")
+        logger.info("Request ID: %s - Uploading audio to storage", request_id)
         try:
-            s3_key = await s3_client.upload_audio_stream(
+            s3_key = await storage.upload_audio_stream(
                 audio_file, request_id, safe_name
             )
         except Exception as e:

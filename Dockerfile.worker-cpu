@@ -24,9 +24,11 @@ COPY --chown=ubuntu --from=ghcr.io/astral-sh/uv:0.10.4 /uv /bin/uv
 
 COPY --chown=ubuntu pyproject.toml ./
 ARG UV_EXTRA_ARGS=""
+ENV UV_PROJECT_ENVIRONMENT=$HOME/venv \
+    VIRTUAL_ENV=$HOME/venv
 RUN uv sync --compile-bytecode --no-install-project --no-dev --extra cpu --extra kafka ${UV_EXTRA_ARGS}
 
-ENV PATH="$HOME/workspace/.venv/bin:$PATH"
+ENV PATH="$HOME/venv/bin:$PATH"
 
 RUN mkdir -p $HOME/nltk_data/tokenizers
 RUN python3 -m nltk.downloader -d $HOME/nltk_data punkt_tab
@@ -35,7 +37,7 @@ ENV NLTK_DATA=$HOME/nltk_data
 COPY --chown=ubuntu src/whisperx_api_server ./whisperx_api_server
 COPY --chown=ubuntu src/whisperx_worker ./whisperx_worker
 
-RUN mkdir -p $HOME/.cache/huggingface && mkdir -p $HOME/.cache/torch
+RUN mkdir -p $HOME/.cache/huggingface && mkdir -p $HOME/.cache/torch && mkdir -p $HOME/shared
 
 ENV DO_NOT_TRACK=1
 ENV DISABLE_TELEMETRY=1

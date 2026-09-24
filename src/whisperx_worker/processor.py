@@ -6,8 +6,7 @@ from typing import Any
 
 import orjson
 
-import whisperx_api_server.s3_client as s3_client
-from whisperx_api_server import url_fetch
+from whisperx_api_server import file_fetch, url_fetch
 from whisperx_api_server.backends.registry import (
     get_alignment_backend,
     get_default_transcription_model_name,
@@ -19,6 +18,7 @@ from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import ORJSON_OPTIONS
 from whisperx_api_server.observability import pipeline as _pipe
+from whisperx_api_server.storage import service as storage
 from whisperx_api_server.transcriber import (
     _cleanup_cache_only,
     _finalize_text,
@@ -35,6 +35,74 @@ def serialize_result(result: dict) -> bytes:
     return orjson.dumps(result, option=ORJSON_OPTIONS)
 
 
+_INPUT_STAGE = {
+    "audio_url": "url_download",
+    "s3_key": "audio_download",
+    "file_path": "file_copy",
+}
+
+
+def _select_input_mode(event: dict[str, Any], job_id: str) -> tuple[str, str]:
+    """Return (mode, locator) for the event's single input source."""
+    present = [(mode, str(event[mode])) for mode in _INPUT_STAGE if event.get(mode)]
+    if len(present) != 1:
+        raise ValueError(
+            f"Job {job_id}: event must specify exactly one of {', '.join(_INPUT_STAGE)}"
+        )
+    return present[0]
+
+
+def _owned_subtree(config: Any) -> str:
+    """The subtree this service writes to, excluded from external file inputs."""
+    fs = config.storage.fs
+    if config.storage.backend != "fs" or not fs.root.strip():
+        return ""
+    return os.path.join(os.path.abspath(fs.root.strip()), fs.prefix)
+
+
+async def _fetch_input(
+    mode: str, locator: str, *, config: Any, job_id: str, filename: str
+) -> str:
+    """Materialize the job's audio into a temp file this process owns.
+
+    Always a copy — the pipeline deletes the file it is handed as soon as the
+    audio is decoded, so handing back a producer's original would destroy it.
+    """
+    if mode == "audio_url":
+        logger.info("Job %s: downloading audio from URL", job_id)
+        return await url_fetch.download_url_to_temp(
+            locator,
+            job_id,
+            max_bytes=config.max_upload_size_bytes,
+            connect_timeout=config.url_fetch_connect_timeout_seconds,
+            total_timeout=config.url_fetch_timeout_seconds,
+            allow_private_hosts=config.url_fetch_allow_private_hosts,
+            allowed_hosts=config.url_fetch_allowed_hosts,
+        )
+
+    if mode == "file_path":
+        if not config.input_fs.enabled:
+            raise ValueError(
+                f"Job {job_id}: event carries file_path but filesystem inputs are "
+                "disabled. Set INPUT_FS__ENABLED=true to accept paths from the "
+                "request topic."
+            )
+        logger.info("Job %s: copying audio from the shared mount", job_id)
+        return await file_fetch.copy_to_temp(
+            locator,
+            job_id,
+            root=config.input_fs.root or config.storage.fs.root,
+            owned_subtree=_owned_subtree(config),
+            allowed_dirs=config.input_fs.allowed_dirs,
+            max_bytes=config.max_upload_size_bytes,
+        )
+
+    logger.info("Job %s: downloading audio from storage (key: %s)", job_id, locator)
+    return await storage.download_audio_to_temp(
+        locator, suffix=_safe_filename_suffix(filename)
+    )
+
+
 async def process_job(
     event: dict[str, Any],
     *,
@@ -44,12 +112,7 @@ async def process_job(
 ) -> dict[str, Any]:
     config = get_config()
     job_id = event["job_id"]
-    s3_key = event.get("s3_key")
-    audio_url = event.get("audio_url")
-    if bool(s3_key) == bool(audio_url):
-        raise ValueError(
-            f"Job {job_id}: event must specify exactly one of s3_key or audio_url"
-        )
+    input_mode, input_locator = _select_input_mode(event, job_id)
     filename = event.get("filename", "audio")
     params = event["params"]
 
@@ -85,37 +148,18 @@ async def process_job(
             timeline_out[last_name]["completed_at"] = time.time()
 
     try:
-        if audio_url is not None:
-            await _progress("url_download")
-            t0 = time.perf_counter()
-            logger.info("Job %s: downloading audio from URL", job_id)
-            file_path = await url_fetch.download_url_to_temp(
-                audio_url,
-                job_id,
-                max_bytes=config.max_upload_size_bytes,
-                connect_timeout=config.url_fetch_connect_timeout_seconds,
-                total_timeout=config.url_fetch_timeout_seconds,
-                allow_private_hosts=config.url_fetch_allow_private_hosts,
-                allowed_hosts=config.url_fetch_allowed_hosts,
-            )
-            profile["url_download"] = time.perf_counter() - t0
-            logger.info(
-                "Job %s: URL download took %.2f seconds",
-                job_id,
-                profile["url_download"],
-            )
-        else:
-            await _progress("s3_download")
-            t0 = time.perf_counter()
-            logger.info("Job %s: downloading audio from S3 (key: %s)", job_id, s3_key)
-            assert s3_key is not None
-            file_path = await s3_client.download_audio_to_temp(
-                s3_key, suffix=_safe_filename_suffix(filename)
-            )
-            profile["s3_download"] = time.perf_counter() - t0
-            logger.info(
-                "Job %s: S3 download took %.2f seconds", job_id, profile["s3_download"]
-            )
+        stage = _INPUT_STAGE[input_mode]
+        await _progress(stage)
+        t0 = time.perf_counter()
+        file_path = await _fetch_input(
+            input_mode,
+            input_locator,
+            config=config,
+            job_id=job_id,
+            filename=filename,
+        )
+        profile[stage] = time.perf_counter() - t0
+        logger.info("Job %s: %s took %.2f seconds", job_id, stage, profile[stage])
 
         await _progress("audio_load")
         t0 = time.perf_counter()

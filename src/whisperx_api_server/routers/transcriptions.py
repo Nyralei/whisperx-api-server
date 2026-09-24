@@ -18,7 +18,6 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response
 
 import whisperx_api_server.kafka_client as kafka_client
-import whisperx_api_server.s3_client as s3_client
 import whisperx_api_server.transcriber as transcriber
 from whisperx_api_server import request_status, result_store, webhook
 from whisperx_api_server.config import (
@@ -29,6 +28,8 @@ from whisperx_api_server.config import (
 )
 from whisperx_api_server.dependencies import get_config
 from whisperx_api_server.formatters import format_transcription
+from whisperx_api_server.storage import service as storage
+from whisperx_api_server.storage.contracts import ObjectNotFound, StorageKeyError
 from whisperx_api_server.transcriber import (
     InvalidAudioError,
     QueueFullError,
@@ -36,7 +37,7 @@ from whisperx_api_server.transcriber import (
 )
 from whisperx_api_server.url_fetch import filename_from_url, validate_url_for_fetch
 
-# Mirror routers/status.py and main.py so a malformed id can't reach S3 or logs.
+# Mirror routers/status.py and main.py so a malformed id can't reach storage or logs.
 _REQUEST_ID_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 try:
@@ -60,6 +61,16 @@ def _raise_for_transcription_error(
         logger.info("Request ID: %s - Upload too large: %s", request_id, e)
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e)
+        ) from e
+    if isinstance(e, StorageKeyError):
+        logger.warning("Request ID: %s - Rejected storage key: %s", request_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        ) from e
+    if isinstance(e, ObjectNotFound):
+        logger.info("Request ID: %s - Input object missing: %s", request_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
         ) from e
     if isinstance(e, QueueFullError):
         logger.warning("Request ID: %s - Queue full: %s", request_id, e)
@@ -542,8 +553,8 @@ async def translate_audio(
     "/v1/audio/transcriptions/{request_id}/result",
     description=(
         "Fetch and (re-)format the final result of a finished transcription job. "
-        "Kafka mode reads the durable S3 envelope (availability bounded by "
-        "S3__OBJECT_EXPIRY_DAYS); direct mode reads the on-disk result store "
+        "Kafka mode reads the durable stored envelope (availability bounded by the "
+        "storage backend's retention); direct mode reads the on-disk result store "
         "(bounded by RESULT_STORE__TTL_SECONDS / MAX_ENTRIES, and returns 404 when "
         "RESULT_STORE__ENABLED is false). 404 while pending/unknown/expired; the "
         "mapped error response for a failed job; the formatted transcription on success."
@@ -575,7 +586,7 @@ async def get_transcription_result(
             stored, response_format, highlight_words=highlight_words
         )
 
-    raw = await s3_client.get_result(request_id)
+    raw = await storage.get_result(request_id)
     if raw is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

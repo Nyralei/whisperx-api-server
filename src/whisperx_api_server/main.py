@@ -230,10 +230,29 @@ async def lifespan(app: FastAPI):
 
     try:
         if config.mode == DistributedMode.KAFKA:
-            from whisperx_api_server import kafka_client, s3_client
+            from whisperx_api_server import kafka_client
+            from whisperx_api_server.storage import service as storage
+            from whisperx_api_server.storage import sweeper as storage_sweeper
 
-            await s3_client.init_client(config.s3)
+            await storage.init_storage(config)
             await kafka_client.start(config.kafka)
+
+            def _on_sweep_task_done(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "Storage retention sweep died unexpectedly — expired audio, "
+                        "results and claims will accumulate",
+                        exc_info=task.exception(),
+                    )
+
+            active_store = storage.active_store()
+            sweep_task = (
+                storage_sweeper.start_sweeper(active_store, config)
+                if active_store is not None
+                else None
+            )
+            if sweep_task is not None:
+                sweep_task.add_done_callback(_on_sweep_task_done)
 
             def _on_reply_task_done(task: asyncio.Task) -> None:
                 if not task.cancelled() and task.exception() is not None:
@@ -261,18 +280,23 @@ async def lifespan(app: FastAPI):
             )
             progress_task.add_done_callback(_on_progress_task_done)
 
-            logger.info("Kafka mode: S3 and Kafka clients started")
+            logger.info("Kafka mode: storage and Kafka clients started")
             try:
                 yield
             finally:
                 reply_task.cancel()
                 progress_task.cancel()
+                if sweep_task is not None:
+                    sweep_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reply_task
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await progress_task
+                if sweep_task is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await sweep_task
                 await kafka_client.stop()
-                await s3_client.close_client()
+                await storage.close_storage()
         else:
             selected_backends = resolve_stage_backends()
             logger.info(

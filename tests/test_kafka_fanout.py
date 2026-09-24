@@ -11,7 +11,19 @@ import pytest
 from whisperx_api_server.config import KafkaConfig
 from whisperx_api_server.kafka_client import _fanout_consumer
 
-pytestmark = pytest.mark.anyio
+try:
+    import aiokafka  # noqa: F401
+
+    HAS_AIOKAFKA = True
+except Exception:
+    HAS_AIOKAFKA = False
+
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.skipif(
+        not HAS_AIOKAFKA, reason="aiokafka (kafka extras) not installed"
+    ),
+]
 
 
 async def test_fanout_consumers_join_no_group():

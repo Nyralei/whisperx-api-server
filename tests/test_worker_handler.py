@@ -1,4 +1,4 @@
-"""Unit tests for the worker message handler (no broker, no S3)."""
+"""Unit tests for the worker message handler (no broker, no object store)."""
 
 import asyncio
 import json
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from whisperx_api_server.config import KafkaConfig, S3Config
+from whisperx_api_server.config import KafkaConfig, StorageConfig
 from whisperx_api_server.observability import kafka as _kafka
 from whisperx_worker import handler
 
@@ -48,7 +48,7 @@ class FakeProducer:
         self._order.append(("send", topic))
 
 
-class FakeS3:
+class FakeStorage:
     def __init__(self, order):
         self.results: dict[str, str] = {}
         self.claims: dict[str, dict] = {}
@@ -109,7 +109,7 @@ class _SpyCounter:
 class Harness:
     ctx: handler.WorkerContext
     producer: FakeProducer
-    s3: FakeS3
+    storage: FakeStorage
     order: list
     commits: list
     dlq: _SpyCounter
@@ -122,19 +122,19 @@ def harness(monkeypatch):
     order: list = []
     commits: list = []
     producer = FakeProducer(order)
-    s3 = FakeS3(order)
+    store = FakeStorage(order)
 
     async def _commit():
         commits.append(True)
         order.append(("commit", None))
 
-    config = SimpleNamespace(kafka=KafkaConfig(), s3=S3Config())
+    config = SimpleNamespace(kafka=KafkaConfig(), storage=StorageConfig())
     ctx = handler.WorkerContext(
         producer=producer,
         config=config,
         commit=_commit,
         worker_id="test-worker",
-        s3=s3,
+        storage=store,
     )
 
     dlq = _SpyCounter()
@@ -144,7 +144,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(_kafka, "idempotent_skip_total", skip)
     monkeypatch.setattr(_kafka, "lease_deferred_total", deferred)
     monkeypatch.setattr(handler, "_LEASE_DEFER_SECONDS", 0)
-    return Harness(ctx, producer, s3, order, commits, dlq, skip, deferred)
+    return Harness(ctx, producer, store, order, commits, dlq, skip, deferred)
 
 
 async def _fake_ok(event, *, progress_producer, progress_topic, timeline_out):
@@ -165,15 +165,15 @@ async def test_success_writes_result_before_reply_then_commits(harness, monkeypa
     sends = _reply_sends(harness)
     assert len(sends) == 1
     # Stored envelope is byte-identical to the reply payload.
-    assert sends[0].value == harness.s3.results["j1"]
+    assert sends[0].value == harness.storage.results["j1"]
     assert json.loads(sends[0].value)["status"] == "ok"
 
     kinds = [step[0] for step in harness.order]
     assert (
         kinds.index("put_result") < kinds.index("send_and_wait") < kinds.index("commit")
     )
-    assert harness.s3.deleted_audio == ["audio/j1/a.wav"]
-    assert harness.s3.claim_deletes == 1
+    assert harness.storage.deleted_audio == ["audio/j1/a.wav"]
+    assert harness.storage.claim_deletes == 1
     assert harness.commits == [True]
     assert harness.dlq.count == 0
 
@@ -187,13 +187,13 @@ async def test_handled_error_replies_and_commits(harness, monkeypatch):
 
     await handler.handle_message(event, harness.ctx)
 
-    env = json.loads(harness.s3.results["j2"])
+    env = json.loads(harness.storage.results["j2"])
     assert env["status"] == "error"
     assert env["error_type"] == "ValueError"
     assert "bad audio" in env["error"]
     assert json.loads(_reply_sends(harness)[0].value)["status"] == "error"
     assert harness.commits == [True]
-    assert harness.s3.claim_deletes == 1
+    assert harness.storage.claim_deletes == 1
     assert harness.dlq.count == 0
 
 
@@ -204,7 +204,7 @@ async def test_redelivered_completed_job_resends_without_reprocessing(
         raise AssertionError("process_job must not run on the resend path")
 
     monkeypatch.setattr(handler, "process_job", _boom)
-    harness.s3.results["j3"] = json.dumps(
+    harness.storage.results["j3"] = json.dumps(
         {"job_id": "j3", "status": "ok", "result": {"text": "cached"}}
     )
     event = {"job_id": "j3", "s3_key": "audio/j3/a.wav", "params": {}}
@@ -218,7 +218,7 @@ async def test_redelivered_completed_job_resends_without_reprocessing(
     assert harness.skip.count == 1
     assert harness.dlq.count == 0
     # No attempt counted on the resend path.
-    assert harness.s3.claims == {}
+    assert harness.storage.claims == {}
 
 
 async def test_completion_webhook_fires_on_success(harness, monkeypatch):
@@ -243,7 +243,7 @@ async def test_completion_webhook_fires_on_success(harness, monkeypatch):
     url, envelope = calls[0]
     assert url == "http://hook.example/x"
     # The webhook carries the exact stored envelope.
-    assert envelope == harness.s3.results["cb1"]
+    assert envelope == harness.storage.results["cb1"]
     assert json.loads(envelope)["status"] == "ok"
 
 
@@ -275,7 +275,7 @@ async def test_completion_webhook_skipped_on_resend(harness, monkeypatch):
         return True
 
     monkeypatch.setattr(handler.webhook, "deliver_result", _spy)
-    harness.s3.results["cb2"] = json.dumps(
+    harness.storage.results["cb2"] = json.dumps(
         {"job_id": "cb2", "status": "ok", "result": {"text": "cached"}}
     )
     event = {
@@ -334,7 +334,7 @@ async def test_poison_job_routes_to_dlq_after_max_attempts(harness, monkeypatch)
     for attempt in (1, 2, 3):
         with pytest.raises(_Crash):
             await handler.handle_message(event, harness.ctx)
-        assert harness.s3.claims["poison"]["attempts"] == attempt
+        assert harness.storage.claims["poison"]["attempts"] == attempt
         assert harness.commits == []
         assert harness.dlq.count == 0
 
@@ -354,8 +354,8 @@ async def test_poison_job_routes_to_dlq_after_max_attempts(harness, monkeypatch)
     assert payload["job_id"] == "poison"
 
     assert json.loads(_reply_sends(harness)[-1].value)["status"] == "error"
-    assert "poison" in harness.s3.results
-    assert harness.s3.claims.get("poison") is None
+    assert "poison" in harness.storage.results
+    assert harness.storage.claims.get("poison") is None
     assert harness.commits == [True]
     assert harness.dlq.count == 1
 
@@ -372,7 +372,7 @@ async def test_live_foreign_lease_defers_and_requeues(harness, monkeypatch):
         raise AssertionError("process_job must not run while another worker leases")
 
     monkeypatch.setattr(handler, "process_job", _boom)
-    harness.s3.claims["j-busy"] = _live_lease("other-worker")
+    harness.storage.claims["j-busy"] = _live_lease("other-worker")
     event = {"job_id": "j-busy", "s3_key": "audio/j-busy/a.wav", "params": {}}
 
     await handler.handle_message(event, harness.ctx)
@@ -388,8 +388,8 @@ async def test_live_foreign_lease_defers_and_requeues(harness, monkeypatch):
     assert harness.commits == [True]
     assert harness.deferred.count == 1
     # The holder's lease is untouched.
-    assert harness.s3.claims["j-busy"]["owner"] == "other-worker"
-    assert harness.s3.claims["j-busy"]["attempts"] == 1
+    assert harness.storage.claims["j-busy"]["owner"] == "other-worker"
+    assert harness.storage.claims["j-busy"]["attempts"] == 1
 
 
 async def test_defer_resends_result_that_appears_while_parked(harness, monkeypatch):
@@ -400,19 +400,19 @@ async def test_defer_resends_result_that_appears_while_parked(harness, monkeypat
         raise AssertionError("process_job must not run")
 
     monkeypatch.setattr(handler, "process_job", _boom)
-    harness.s3.claims["j-fin"] = _live_lease("other-worker")
+    harness.storage.claims["j-fin"] = _live_lease("other-worker")
     envelope = json.dumps({"job_id": "j-fin", "status": "ok", "result": {"text": "x"}})
 
     calls = {"n": 0}
-    real_get = harness.s3.get_result
+    real_get = harness.storage.get_result
 
     async def _get_result(job_id):
         calls["n"] += 1
         if calls["n"] >= 2:
-            harness.s3.results.setdefault(job_id, envelope)
+            harness.storage.results.setdefault(job_id, envelope)
         return await real_get(job_id)
 
-    monkeypatch.setattr(harness.s3, "get_result", _get_result)
+    monkeypatch.setattr(harness.storage, "get_result", _get_result)
     event = {"job_id": "j-fin", "s3_key": "audio/j-fin/a.wav", "params": {}}
 
     await handler.handle_message(event, harness.ctx)
@@ -434,7 +434,7 @@ async def test_expired_foreign_lease_taken_over(harness, monkeypatch):
     """A lease whose holder crashed (expired, never renewed) must be taken over
     and the job processed, advancing the attempts counter."""
     monkeypatch.setattr(handler, "process_job", _fake_ok)
-    harness.s3.claims["j-dead"] = {
+    harness.storage.claims["j-dead"] = {
         "attempts": 1,
         "owner": "crashed-worker",
         "expires_at": time.time() - 10.0,
@@ -445,7 +445,7 @@ async def test_expired_foreign_lease_taken_over(harness, monkeypatch):
 
     assert json.loads(_reply_sends(harness)[0].value)["status"] == "ok"
     assert harness.commits == [True]
-    assert harness.s3.claims.get("j-dead") is None  # released at terminal
+    assert harness.storage.claims.get("j-dead") is None  # released at terminal
     assert harness.deferred.count == 0
 
 
@@ -460,15 +460,15 @@ async def test_result_stored_between_check_and_acquire_resends(harness, monkeypa
     envelope = json.dumps({"job_id": "j-race", "status": "ok", "result": {"text": "r"}})
 
     calls = {"n": 0}
-    real_get = harness.s3.get_result
+    real_get = harness.storage.get_result
 
     async def _get_result(job_id):
         calls["n"] += 1
         if calls["n"] >= 2:
-            harness.s3.results.setdefault(job_id, envelope)
+            harness.storage.results.setdefault(job_id, envelope)
         return await real_get(job_id)
 
-    monkeypatch.setattr(harness.s3, "get_result", _get_result)
+    monkeypatch.setattr(harness.storage, "get_result", _get_result)
     event = {"job_id": "j-race", "s3_key": "audio/j-race/a.wav", "params": {}}
 
     await handler.handle_message(event, harness.ctx)
@@ -476,7 +476,7 @@ async def test_result_stored_between_check_and_acquire_resends(harness, monkeypa
     assert len(_reply_sends(harness)) == 1
     assert harness.skip.count == 1
     assert harness.commits == [True]
-    assert harness.s3.claims.get("j-race") is None
+    assert harness.storage.claims.get("j-race") is None
 
 
 async def test_lease_renewed_and_heartbeat_during_long_job(harness, monkeypatch):
@@ -494,7 +494,7 @@ async def test_lease_renewed_and_heartbeat_during_long_job(harness, monkeypatch)
 
     await handler.handle_message(event, harness.ctx)
 
-    assert "j-slow" in harness.s3.renewals
+    assert "j-slow" in harness.storage.renewals
     heartbeats = [
         s
         for s in harness.producer.sends

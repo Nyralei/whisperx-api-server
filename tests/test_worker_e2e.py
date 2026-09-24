@@ -1,8 +1,8 @@
-"""Worker handler end-to-end against a real Kafka broker + real MinIO (S3).
+"""Worker handler end-to-end against a real Kafka broker + a real S3 server.
 
 Closes the gap the in-process fakes cannot reach: the worker's idempotency
 marker resend and poison-job dead-letter routing run here through real S3
-objects (``claims/`` and ``results/`` in MinIO) and real Kafka offset
+objects (``claims/`` and ``results/`` in the bucket) and real Kafka offset
 redelivery, plus the broker-level reply fan-out that makes multi-replica reply
 routing correct.
 
@@ -27,8 +27,8 @@ import whisperx_worker.handler as worker_handler
 import whisperx_worker.processor as processor
 from fake_backends import fake_transcription
 from whisperx_api_server import kafka_client, request_status
-from whisperx_api_server import s3_client as s3_client
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.storage import service as storage
 from whisperx_api_server.transcriber import init_concurrency
 from whisperx_worker.handler import WorkerContext, handle_message
 
@@ -50,47 +50,23 @@ def kafka_bootstrap():
         container.stop()
 
 
-@pytest.fixture(scope="module")
-def minio_endpoint():
-    import re
+@pytest.fixture(params=["s3", "fs"])
+async def worker_env(request, kafka_bootstrap, tmp_path_factory, monkeypatch):
+    """Every e2e scenario runs against both storage backends.
 
-    from testcontainers.core.container import DockerContainer
-    from testcontainers.core.wait_strategies import LogMessageWaitStrategy
-
-    container = (
-        DockerContainer("minio/minio:latest")
-        .with_env("MINIO_ROOT_USER", "minioadmin")
-        .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
-        .with_exposed_ports(9000)
-        .with_command("server /data")
-        .waiting_for(LogMessageWaitStrategy(re.compile(r"API:|Status:")))
-    )
-    try:
-        container.start()
-    except Exception as e:
-        pytest.skip(f"MinIO unavailable (Docker required): {e}")
-    try:
-        host = container.get_container_host_ip()
-        port = container.get_exposed_port(9000)
-        yield f"http://{host}:{port}"
-    finally:
-        container.stop()
-
-
-@pytest.fixture
-async def worker_env(kafka_bootstrap, minio_endpoint, monkeypatch):
+    The redelivery / idempotent-resend / DLQ paths are exactly where a lease
+    matters, so the fs backend gets the same coverage the S3 path has. The fs
+    parameter needs no S3 server, so the container is only requested in the s3
+    branch.
+    """
     uid = uuid.uuid4().hex[:8]
     env = {
         "MODE": "kafka",
         "BACKENDS__TRANSCRIPTION": "fake",
         "BACKENDS__ALIGNMENT": "fake",
         "BACKENDS__DIARIZATION": "fake",
-        "S3__ENDPOINT_URL": minio_endpoint,
-        "S3__BUCKET": f"wx-{uid}",
-        "S3__ACCESS_KEY_ID": "minioadmin",
-        "S3__SECRET_ACCESS_KEY": "minioadmin",
-        "S3__REGION": "us-east-1",
-        "S3__DELETE_AFTER_DOWNLOAD": "true",
+        "STORAGE__BACKEND": request.param,
+        "STORAGE__DELETE_AFTER_DOWNLOAD": "true",
         "KAFKA__BOOTSTRAP_SERVERS": kafka_bootstrap,
         "KAFKA__REQUEST_TOPIC": f"req-{uid}",
         "KAFKA__REPLY_TOPIC": f"rep-{uid}",
@@ -104,19 +80,30 @@ async def worker_env(kafka_bootstrap, minio_endpoint, monkeypatch):
         # The webhook test posts to a loopback capture server.
         "URL_FETCH_ALLOW_PRIVATE_HOSTS": "true",
     }
+    if request.param == "s3":
+        env |= {
+            "S3__ENDPOINT_URL": request.getfixturevalue("s3_endpoint"),
+            "S3__BUCKET": f"wx-{uid}",
+            "S3__ACCESS_KEY_ID": "minioadmin",
+            "S3__SECRET_ACCESS_KEY": "minioadmin",
+            "S3__REGION": "us-east-1",
+        }
+    else:
+        env["STORAGE__FS__ROOT"] = str(tmp_path_factory.mktemp(f"wx-{uid}"))
+
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     get_config.cache_clear()
     cfg = get_config()
 
-    await s3_client.init_client(cfg.s3)
+    await storage.init_storage(cfg)
     await kafka_client.start(cfg.kafka)
     init_concurrency()
     try:
         yield cfg
     finally:
         await kafka_client.stop()
-        await s3_client.close_client()
+        await storage.close_storage()
         kafka_client._pending_jobs.clear()
         get_config.cache_clear()
 
@@ -241,7 +228,7 @@ async def test_marker_resend_skips_reprocess_through_real_worker(
     )
 
     job_id = "job-marker-1"
-    key = await s3_client.upload_audio(b"rawbytes", job_id, "a.wav")
+    key = await storage.upload_audio(b"rawbytes", job_id, "a.wav")
     event = _job_event(job_id, key)
 
     producer = await _producer(cfg)
@@ -259,7 +246,7 @@ async def test_marker_resend_skips_reprocess_through_real_worker(
         with pytest.raises(RuntimeError):
             await handle_message(json.loads(msg.value), ctx)
         assert len(fake_transcription.calls) == 1
-        assert await s3_client.get_result(job_id) is not None
+        assert await storage.get_result(job_id) is not None
 
         # Worker restart → the uncommitted record is redelivered.
         consumer.seek(tp, msg.offset)
@@ -296,7 +283,7 @@ async def test_poison_job_routed_to_dlq_and_future_fails_fast(worker_env, monkey
     fake_transcription.raise_exc = Poison("worker-killing job")
 
     job_id = "job-poison-1"
-    key = await s3_client.upload_audio(b"rawbytes", job_id, "a.wav")
+    key = await storage.upload_audio(b"rawbytes", job_id, "a.wav")
     event = _job_event(job_id, key)
 
     producer = await _producer(cfg)
@@ -333,7 +320,7 @@ async def test_poison_job_routed_to_dlq_and_future_fails_fast(worker_env, monkey
     assert dlq["reason"] == "max_delivery_attempts exceeded"
     assert dlq["worker_id"] == "w-test"
 
-    stored = await s3_client.get_result(job_id)
+    stored = await storage.get_result(job_id)
     assert stored is not None
     assert json.loads(stored)["status"] == "error"
 
@@ -379,7 +366,7 @@ async def test_completion_webhook_delivered_through_real_worker(
     callback_url = f"http://127.0.0.1:{port}/hook"
 
     job_id = "job-webhook-1"
-    key = await s3_client.upload_audio(b"rawbytes", job_id, "a.wav")
+    key = await storage.upload_audio(b"rawbytes", job_id, "a.wav")
     event = _job_event(job_id, key)
     event["callback_url"] = callback_url
 
@@ -415,8 +402,8 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
     monkeypatch.setattr(processor, "load_audio_from_path", _fake_load_audio)
 
     j1, j2 = "job-drain-1", "job-drain-2"
-    k1 = await s3_client.upload_audio(b"raw1", j1, "a.wav")
-    k2 = await s3_client.upload_audio(b"raw2", j2, "a.wav")
+    k1 = await storage.upload_audio(b"raw1", j1, "a.wav")
+    k2 = await storage.upload_audio(b"raw2", j2, "a.wav")
 
     shutdown_event = asyncio.Event()
     paused_for_job = [False]
@@ -457,8 +444,8 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
 
     # Only the in-flight job ran and was persisted; the queued job is untouched.
     assert processed == [j1]
-    assert await s3_client.get_result(j1) is not None
-    assert await s3_client.get_result(j2) is None
+    assert await storage.get_result(j1) is not None
+    assert await storage.get_result(j2) is None
 
     replies = await _drain_topic(cfg, cfg.kafka.reply_topic, j1)
     assert len(replies) == 1

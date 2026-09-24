@@ -5,8 +5,8 @@ import pytest
 
 import whisperx_worker.processor as processor
 from fake_backends import fake_diarization, fake_transcription
-from whisperx_api_server import s3_client
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.storage import service as storage
 
 pytestmark = pytest.mark.anyio
 
@@ -35,7 +35,7 @@ async def _run_job(monkeypatch, *, segments):
     async def _fake_transcribe(**kwargs):
         return {"segments": segments, "language": "en"}
 
-    monkeypatch.setattr(s3_client, "download_audio_to_temp", _fake_download)
+    monkeypatch.setattr(storage, "download_audio_to_temp", _fake_download)
     monkeypatch.setattr(processor, "load_audio_from_path", _fake_load)
     monkeypatch.setattr(fake_transcription, "transcribe", _fake_transcribe)
 

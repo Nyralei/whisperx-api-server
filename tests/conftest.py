@@ -106,3 +106,39 @@ def sine_wav_bytes(
 @pytest.fixture(scope="session")
 def sine_wav() -> bytes:
     return sine_wav_bytes()
+
+
+# Whichever S3-compatible server the stack tests against; currently Silo, a
+# maintained MinIO fork, because the upstream minio/minio repository is no longer
+# publicly pullable. Named for the role, not the vendor, so the next swap is one
+# line here. Any replacement must read MINIO_ROOT_* and take `server /data`, or
+# the fixture below needs adjusting too.
+S3_IMAGE = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
+
+
+@pytest.fixture(scope="session")
+def s3_endpoint():
+    """A real S3 endpoint. Session-scoped: one container for the whole run."""
+    import re
+
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.wait_strategies import LogMessageWaitStrategy
+
+    container = (
+        DockerContainer(S3_IMAGE)
+        .with_env("MINIO_ROOT_USER", "minioadmin")
+        .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
+        .with_exposed_ports(9000)
+        .with_command("server /data")
+        .waiting_for(LogMessageWaitStrategy(re.compile(r"API:|Status:")))
+    )
+    try:
+        container.start()
+    except Exception as e:
+        pytest.skip(f"S3 backend unavailable (Docker required): {e}")
+    try:
+        host = container.get_container_host_ip()
+        port = container.get_exposed_port(9000)
+        yield f"http://{host}:{port}"
+    finally:
+        container.stop()

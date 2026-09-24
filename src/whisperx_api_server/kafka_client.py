@@ -43,6 +43,10 @@ def _rehydrate_worker_error(error_type: str | None, message: str) -> BaseExcepti
     cycle.
     """
     if error_type:
+        from whisperx_api_server.storage.contracts import (
+            ObjectNotFound,
+            StorageKeyError,
+        )
         from whisperx_api_server.transcriber import (
             InvalidAudioError,
             UploadTooLargeError,
@@ -51,6 +55,8 @@ def _rehydrate_worker_error(error_type: str | None, message: str) -> BaseExcepti
         mapping: dict[str, type[BaseException]] = {
             "InvalidAudioError": InvalidAudioError,
             "UploadTooLargeError": UploadTooLargeError,
+            "StorageKeyError": StorageKeyError,
+            "ObjectNotFound": ObjectNotFound,
             "TimeoutError": TimeoutError,
             "ValueError": ValueError,
         }
@@ -344,6 +350,9 @@ async def submit_job(
 
     event = {
         "job_id": job_id,
+        # Historical name: carries a storage key for whichever backend is active,
+        # not necessarily S3. Renaming it would hard-fail in-flight events during
+        # a rolling upgrade, for no user benefit.
         "s3_key": s3_key,
         "audio_url": audio_url,
         "filename": filename,

@@ -1,6 +1,7 @@
+import re
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -281,6 +282,7 @@ class S3Config(BaseModel):
     secret_access_key: str = Field(default="minioadmin", repr=False)
     bucket: str = Field(default="whisperx-audio")
     region: str = Field(default="us-east-1")
+    # Deprecated: use storage.delete_after_download. Still honoured when set.
     delete_after_download: bool = Field(default=True)
     # Lifecycle expiry for objects in the bucket (days). 0 = disabled.
     object_expiry_days: int = Field(default=1)
@@ -294,6 +296,81 @@ class S3Config(BaseModel):
     multipart_concurrency: int = Field(default=4)
     # When true, apply a bucket lifecycle rule on startup. Requires object_expiry_days > 0.
     manage_lifecycle: bool = Field(default=False)
+
+
+_OCTAL_MODE = re.compile(r"^[0-7]{3,4}$")
+_FS_PREFIX_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+class FsStorageConfig(BaseModel):
+    # Shared POSIX mount, visible at the SAME path in every API and worker
+    # container. Required when storage.backend == "fs"; validated at startup so
+    # direct mode never trips it.
+    root: str = Field(default="")
+    # whisperx's private subtree under root. Keeps audio/results/claims from
+    # colliding with files owned by other services sharing the mount, and bounds
+    # the retention sweeper.
+    prefix: str = Field(default="whisperx")
+    # Octal digits without a prefix: STORAGE__FS__DIR_MODE=770. Kept as a string
+    # and converted with int(v, 8) at use. Typed as int, "770" would parse as
+    # decimal 770 == 0o1402 == r------wT: owner read-only, no group access,
+    # world-writable, sticky — the inverse of the intended rwxrwx---.
+    dir_mode: str = Field(default="770")
+    file_mode: str = Field(default="660")
+    fsync: bool = Field(default=True)
+    # Startup refuses mounts whose filesystem type is known to break cross-host
+    # atomic create. Set true to override that refusal.
+    allow_unsafe_mount: bool = Field(default=False)
+    # Retention for whisperx-owned objects under <root>/<prefix>. 0 = never sweep.
+    retention_days: int = Field(default=1, ge=0)
+    sweep_interval_seconds: float = Field(default=3600.0, ge=0.0)  # 0 = disabled
+
+    @field_validator("dir_mode", "file_mode")
+    @classmethod
+    def _validate_octal_mode(cls, v: str) -> str:
+        if not _OCTAL_MODE.match(v):
+            raise ValueError(
+                f"must be 3-4 octal digits without a prefix (e.g. '770'), got {v!r}"
+            )
+        return v
+
+    @field_validator("prefix")
+    @classmethod
+    def _validate_prefix(cls, v: str) -> str:
+        cleaned = v.strip().strip("/")
+        # "." and ".." match the charset but would place the owned subtree at or
+        # above the root, handing the retention sweeper other services' files.
+        if cleaned in (".", "..") or not _FS_PREFIX_SAFE.match(cleaned):
+            raise ValueError(
+                f"must be a non-empty single path segment of [A-Za-z0-9._-], got {v!r}"
+            )
+        return cleaned
+
+
+class InputFsConfig(BaseModel):
+    """Accepting job inputs that another service placed on a shared mount.
+
+    Kafka only — there is no HTTP equivalent, because a local-path parameter on
+    a public endpoint is a local-file-inclusion primitive.
+    """
+
+    # Off by default: this is an inbound trust surface, so an existing
+    # deployment must not silently start accepting filesystem paths from a topic.
+    enabled: bool = Field(default=False)
+    # Confinement boundary for file_path inputs. Empty inherits storage.fs.root,
+    # which is the common single-mount case.
+    root: str = Field(default="")
+    # Optional narrowing within root. Empty = anywhere under root.
+    allowed_dirs: list[str] = Field(default_factory=list)
+
+
+class StorageConfig(BaseModel):
+    # "s3" | "fs". Kafka mode only; direct mode never touches object storage.
+    backend: str = Field(default="s3")
+    # Delete the stored input object once the job has produced a result. Never
+    # applies to externally-owned files supplied via file_path.
+    delete_after_download: bool = Field(default=True)
+    fs: FsStorageConfig = FsStorageConfig()
 
 
 class MetricsConfig(BaseModel):
@@ -439,6 +516,10 @@ class Config(BaseSettings):
 
     s3: S3Config = S3Config()
 
+    storage: StorageConfig = StorageConfig()
+
+    input_fs: InputFsConfig = InputFsConfig()
+
     metrics: MetricsConfig = MetricsConfig()
 
     request_status: RequestStatusConfig = RequestStatusConfig()
@@ -464,3 +545,17 @@ class Config(BaseSettings):
                 metrics["enabled"] = flat_val
                 values["metrics"] = metrics
         return values
+
+    @model_validator(mode="after")
+    def _backfill_storage_delete_after_download(self) -> "Config":
+        """Honour the pre-storage-backend spelling S3__DELETE_AFTER_DOWNLOAD.
+
+        Only when storage.delete_after_download was not set explicitly, so a
+        deployment that has moved to the new name always wins.
+        """
+        if (
+            "delete_after_download" not in self.storage.model_fields_set
+            and "delete_after_download" in self.s3.model_fields_set
+        ):
+            self.storage.delete_after_download = self.s3.delete_after_download
+        return self

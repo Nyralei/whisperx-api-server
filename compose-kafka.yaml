@@ -23,7 +23,7 @@ x-api-base: &api-base
   depends_on:
     kafka:
       condition: service_healthy
-    minio:
+    s3:
       condition: service_healthy
   command: uvicorn --factory whisperx_api_server.main:create_app
   ports:
@@ -31,14 +31,19 @@ x-api-base: &api-base
   environment: &api-env
     MODE: kafka
     KAFKA__BOOTSTRAP_SERVERS: kafka:9092
-    S3__ENDPOINT_URL: http://minio:9000
+    S3__ENDPOINT_URL: http://s3:9000
     S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
     S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
     S3__BUCKET: whisperx-audio
+    # STORAGE__BACKEND=fs swaps the S3 service for the shared volume below (single-host
+    # demo; multi-host needs the same export mounted at the same path everywhere).
+    STORAGE__BACKEND: ${STORAGE__BACKEND:-s3}
+    STORAGE__FS__ROOT: /home/ubuntu/shared
     METRICS_ENABLED: "false"
   volumes:
     - hugging_face_cache:/home/ubuntu/.cache/huggingface
     - torch_cache:/home/ubuntu/.cache/torch
+    - whisperx_shared:/home/ubuntu/shared
   healthcheck:
     test: ["CMD-SHELL", "curl --fail --connect-timeout 5 http://localhost:8000/healthcheck || exit 1"]
     interval: 30s
@@ -61,21 +66,27 @@ x-worker-cuda-base: &worker-cuda-base
   depends_on:
     kafka:
       condition: service_healthy
-    minio:
+    s3:
       condition: service_healthy
   ports:
     - "9091:9091"
   environment: &worker-env
     MODE: kafka
     KAFKA__BOOTSTRAP_SERVERS: kafka:9092
-    S3__ENDPOINT_URL: http://minio:9000
+    S3__ENDPOINT_URL: http://s3:9000
     S3__ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
     S3__SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
     S3__BUCKET: whisperx-audio
+    STORAGE__BACKEND: ${STORAGE__BACKEND:-s3}
+    STORAGE__FS__ROOT: /home/ubuntu/shared
+    # Off unless explicitly enabled: accepting file_path off the request topic is
+    # an inbound trust surface. Only the worker consumes it.
+    INPUT_FS__ENABLED: ${INPUT_FS__ENABLED:-false}
     METRICS_ENABLED: "false"
   volumes:
     - hugging_face_cache:/home/ubuntu/.cache/huggingface
     - torch_cache:/home/ubuntu/.cache/torch
+    - whisperx_shared:/home/ubuntu/shared
   deploy:
     resources:
       reservations:
@@ -96,7 +107,7 @@ x-worker-cpu-base: &worker-cpu-base
   depends_on:
     kafka:
       condition: service_healthy
-    minio:
+    s3:
       condition: service_healthy
   ports:
     - "9091:9091"
@@ -104,6 +115,7 @@ x-worker-cpu-base: &worker-cpu-base
   volumes:
     - hugging_face_cache:/home/ubuntu/.cache/huggingface
     - torch_cache:/home/ubuntu/.cache/torch
+    - whisperx_shared:/home/ubuntu/shared
 
 x-prometheus: &prometheus-base
   image: prom/prometheus:v3.11.2
@@ -147,8 +159,11 @@ services:
       retries: 10
       start_period: 30s
 
-  minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  s3:
+    # Silo, a maintained MinIO fork — the upstream minio/minio repository is no
+    # longer publicly pullable. It keeps MinIO's CLI, MINIO_ROOT_* variables and
+    # /minio/health/live, so those names below are correct, not leftovers.
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
@@ -157,7 +172,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes:
-      - minio_data:/data
+      - s3_data:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
       interval: 10s
@@ -233,6 +248,7 @@ services:
       - ./monitoring/prometheus/prometheus-kafka-cpu.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
-  minio_data:
+  s3_data:
   hugging_face_cache:
   torch_cache:
+  whisperx_shared:

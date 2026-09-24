@@ -3,10 +3,8 @@ import contextlib
 import importlib
 import json
 import logging
-import os
 import struct
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -510,27 +508,36 @@ def _handle_reply_event(event: dict[str, Any]) -> None:
         )
 
 
-async def reply_consumer_loop(cfg: KafkaConfig) -> None:
+def _fanout_consumer(cfg: KafkaConfig, topic: str):
+    """A consumer that reads every partition of `topic` from now on.
+
+    Every replica must see every message: replies and progress are matched
+    against per-replica in-memory state, so a message delivered to only one
+    replica would be lost by the others. Passing no group_id gives aiokafka's
+    NoGroupCoordinator, which assigns all partitions directly (and re-assigns
+    when the partition count changes).
+
+    A consumer group would be wrong here, not merely unnecessary: to get
+    fan-out each replica needs its own group, and since nothing ever reads the
+    committed offsets back — the position is always "latest" — every restart
+    would strand another group on the coordinator forever.
+    """
     from aiokafka import AIOKafkaConsumer
 
-    # Unique group per replica so the broker fans every reply out to all of
-    # them; the holder of the future resolves it, the rest no-op.
-    group_id = f"{cfg.reply_group_id}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    consumer = AIOKafkaConsumer(
-        cfg.reply_topic,
+    return AIOKafkaConsumer(
+        topic,
         bootstrap_servers=cfg.bootstrap_servers,
-        group_id=group_id,
+        group_id=None,
         auto_offset_reset="latest",
-        enable_auto_commit=True,
+        enable_auto_commit=False,
         fetch_max_bytes=cfg.max_message_bytes,
         max_partition_fetch_bytes=cfg.max_message_bytes,
     )
+
+
+async def _consume_events(consumer, label: str, topic: str, handle) -> None:
     await consumer.start()
-    logger.info(
-        "Kafka reply consumer started (group: %s, topic: %s)",
-        group_id,
-        cfg.reply_topic,
-    )
+    logger.info("Kafka %s consumer started (groupless, topic: %s)", label, topic)
     try:
         async for msg in consumer:
             if msg.value is None:
@@ -538,57 +545,39 @@ async def reply_consumer_loop(cfg: KafkaConfig) -> None:
             try:
                 event = json.loads(msg.value)
             except Exception:
-                logger.warning("Reply consumer: failed to parse message, skipping")
+                logger.warning("%s consumer: failed to parse message, skipping", label)
                 continue
-            _handle_reply_event(event)
+            handle(event)
     finally:
         await consumer.stop()
-        logger.info("Kafka reply consumer stopped")
+        logger.info("Kafka %s consumer stopped", label)
+
+
+async def reply_consumer_loop(cfg: KafkaConfig) -> None:
+    await _consume_events(
+        _fanout_consumer(cfg, cfg.reply_topic),
+        "reply",
+        cfg.reply_topic,
+        _handle_reply_event,
+    )
 
 
 async def progress_consumer_loop(cfg: KafkaConfig) -> None:
     """Consume per-stage worker progress events and update the request_status tracker.
 
-    Each API replica subscribes with a unique consumer group id (prefix + pid + rand)
-    so every replica receives every event from the broker. A replica upserts a stub
-    entry for any job_id it does not already track, so a replica that did not submit
-    the job (or started mid-job) still converges its status view — this is what makes
-    GET /status work behind a load balancer.
+    Every replica receives every event, and upserts a stub entry for any job_id it
+    does not already track, so a replica that did not submit the job (or started
+    mid-job) still converges its status view — this is what makes GET /status work
+    behind a load balancer.
 
-    Best-effort: parse errors are logged and skipped; commit failures are ignored
-    (we use enable_auto_commit so this is a no-op anyway).
+    Best-effort: parse errors are logged and skipped.
     """
-    from aiokafka import AIOKafkaConsumer
-
-    group_id = f"{cfg.progress_group_id_prefix}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    consumer = AIOKafkaConsumer(
+    await _consume_events(
+        _fanout_consumer(cfg, cfg.progress_topic),
+        "progress",
         cfg.progress_topic,
-        bootstrap_servers=cfg.bootstrap_servers,
-        group_id=group_id,
-        auto_offset_reset="latest",
-        enable_auto_commit=True,
-        fetch_max_bytes=cfg.max_message_bytes,
-        max_partition_fetch_bytes=cfg.max_message_bytes,
+        _handle_progress_event,
     )
-    await consumer.start()
-    logger.info(
-        "Kafka progress consumer started (group: %s, topic: %s)",
-        group_id,
-        cfg.progress_topic,
-    )
-    try:
-        async for msg in consumer:
-            if msg.value is None:
-                continue
-            try:
-                event = json.loads(msg.value)
-            except Exception:
-                logger.warning("Progress consumer: failed to parse message, skipping")
-                continue
-            _handle_progress_event(event)
-    finally:
-        await consumer.stop()
-        logger.info("Kafka progress consumer stopped")
 
 
 def _handle_progress_event(event: dict[str, Any]) -> None:

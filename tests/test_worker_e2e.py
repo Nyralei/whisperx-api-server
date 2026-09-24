@@ -16,7 +16,6 @@ Marked ``kafka``; needs Docker. Run with ``pytest -m kafka``.
 
 import asyncio
 import json
-import os
 import time
 import uuid
 
@@ -452,26 +451,26 @@ async def test_graceful_shutdown_finishes_inflight_and_skips_next(
     assert replies[0]["status"] == "ok"
 
 
-async def test_reply_fanned_out_to_every_replica_group(worker_env):
-    """1.2: the broker delivers each reply to every replica's unique group, so
-    whichever replica holds the future is guaranteed to receive it."""
-    cfg = worker_env
-    from aiokafka import AIOKafkaConsumer
+async def test_reply_fanned_out_to_every_replica(worker_env):
+    """Every replica receives every reply, so whichever one holds the future gets it.
 
-    groups = [
-        f"{cfg.kafka.reply_group_id}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        for _ in range(2)
-    ]
+    Replicas consume groupless (no group_id), which is what the API does: a
+    consumer group would hand each reply to one member only.
+    """
+    cfg = worker_env
+    from aiokafka.admin import AIOKafkaAdminClient
+
+    from whisperx_api_server.kafka_client import _fanout_consumer
+
+    admin = AIOKafkaAdminClient(bootstrap_servers=cfg.kafka.bootstrap_servers)
+    await admin.start()
+    groups_before = {g[0] for g in await admin.list_consumer_groups()}
+
     consumers = []
-    for g in groups:
-        c = AIOKafkaConsumer(
-            cfg.kafka.reply_topic,
-            bootstrap_servers=cfg.kafka.bootstrap_servers,
-            group_id=g,
-            auto_offset_reset="latest",
-            enable_auto_commit=True,
-        )
+    for _ in range(2):
+        c = _fanout_consumer(cfg.kafka, cfg.kafka.reply_topic)
         await c.start()
+        assert c._group_id is None, "replica consumers must not join a group"
         consumers.append(c)
 
     producer = await _producer(cfg)
@@ -501,4 +500,31 @@ async def test_reply_fanned_out_to_every_replica_group(worker_env):
             await c.stop()
         await producer.stop()
 
-    assert all(received), "reply was not fanned out to both replica groups"
+    assert all(received), "reply was not fanned out to both replicas"
+
+    # The point of the change: consuming leaves no group behind on the broker,
+    # so restarts cannot accumulate stranded groups on the coordinator. A grouped
+    # consumer is started first as a control, proving the broker does report the
+    # groups it has — otherwise this assertion could pass by seeing nothing at all.
+    from aiokafka import AIOKafkaConsumer
+
+    control_group = f"control-visible-{uuid.uuid4().hex[:8]}"
+    control = AIOKafkaConsumer(
+        cfg.kafka.reply_topic,
+        bootstrap_servers=cfg.kafka.bootstrap_servers,
+        group_id=control_group,
+        auto_offset_reset="latest",
+    )
+    await control.start()
+    try:
+        await control.getmany(timeout_ms=500)
+        groups_after = {g[0] for g in await admin.list_consumer_groups()}
+    finally:
+        await control.stop()
+    await admin.close()
+
+    assert control_group in groups_after, "broker did not report any group"
+    assert groups_after - groups_before == {control_group}, (
+        "groupless consumers registered groups: "
+        f"{groups_after - groups_before - {control_group}}"
+    )

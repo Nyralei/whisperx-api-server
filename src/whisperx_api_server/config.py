@@ -230,7 +230,6 @@ class KafkaConfig(BaseModel):
     # unique group id (prefix + pid + rand), so the broker fans every reply out
     # to all replicas; only the replica holding the job's future resolves it and
     # the rest no-op. Mirrors the progress-consumer fan-out below.
-    reply_group_id: str = Field(default="whisperx-api-reply")
     # Inactivity timeout: a job is failed only after this long with no reply and
     # no worker signal. Workers heartbeat every job_lease_ttl_seconds/5 while
     # processing, so active jobs of any length stay alive; keep this above
@@ -264,7 +263,6 @@ class KafkaConfig(BaseModel):
     # every replica receives every event; each replica filters by whether the
     # request_id is locally tracked. Failures to publish are non-fatal.
     progress_topic: str = Field(default="transcription-progress")
-    progress_group_id_prefix: str = Field(default="whisperx-api-progress")
     # A job that is delivered more than this many times (tracked per job via the
     # claims/{job_id} lease in S3) is routed to the dead-letter topic instead
     # of being redelivered forever — the guard against a worker-killing poison job.

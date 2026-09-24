@@ -128,6 +128,8 @@ All available settings are defined in [`config.py`](src/whisperx_api_server/conf
 | `KAFKA__PROGRESS_TOPIC` | `transcription-progress` | Best-effort topic for per-stage worker progress events consumed by the status endpoint |
 | `S3__ENDPOINT_URL` | `http://localhost:9000` | S3 / MinIO endpoint |
 | `S3__BUCKET` | `whisperx-audio` | Bucket for audio uploads |
+| `S3__MULTIPART_PART_SIZE` | `8388608` | Part size (bytes) for multipart audio uploads. Clamped up to the 5 MiB S3 minimum, and scaled up for files that would exceed 10000 parts |
+| `S3__MULTIPART_CONCURRENCY` | `4` | Parts uploaded in parallel. Peak buffer per upload ≈ part size × this |
 | `MINIO_ROOT_USER` | `minioadmin` | MinIO root user — **change before deploying** |
 | `MINIO_ROOT_PASSWORD` | `minioadmin` | MinIO root password — **change before deploying** |
 

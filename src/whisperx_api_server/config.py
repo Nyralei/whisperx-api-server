@@ -284,6 +284,14 @@ class S3Config(BaseModel):
     delete_after_download: bool = Field(default=True)
     # Lifecycle expiry for objects in the bucket (days). 0 = disabled.
     object_expiry_days: int = Field(default=1)
+    # Audio uploads larger than one part go out as a multipart upload instead of
+    # a single PutObject, which would buffer and hash the whole body on the
+    # event loop. Clamped up to 5 MiB, the S3 minimum for a non-final part, and
+    # scaled up for files that would otherwise exceed the 10000-part limit.
+    multipart_part_size: int = Field(default=8 * 1024 * 1024)
+    # Parts uploaded concurrently; peak buffered bytes per upload are roughly
+    # multipart_part_size * multipart_concurrency.
+    multipart_concurrency: int = Field(default=4)
     # When true, apply a bucket lifecycle rule on startup. Requires object_expiry_days > 0.
     manage_lifecycle: bool = Field(default=False)
 

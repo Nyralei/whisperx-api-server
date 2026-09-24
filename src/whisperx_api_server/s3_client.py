@@ -104,31 +104,152 @@ async def upload_audio(data: bytes, job_id: str, filename: str) -> str:
     return key
 
 
+# A non-final part must be at least 5 MiB, and one upload may not exceed 10000 parts.
+_MIN_PART_SIZE = 5 * 1024 * 1024
+_MAX_PARTS = 10000
+
+
+def _part_size_for(content_length: int | None) -> int:
+    """Part size that keeps the upload under the 10000-part limit.
+
+    Scales past the configured size for files large enough to run the part count
+    out, so the limit is never discovered at part 10001 with the transfer wasted.
+    """
+    assert _config is not None
+    part_size = max(_MIN_PART_SIZE, _config.multipart_part_size)
+    if content_length is None:
+        return part_size
+    required = -(-content_length // _MAX_PARTS)
+    if required <= part_size:
+        return part_size
+    return -(-required // (1024 * 1024)) * 1024 * 1024
+
+
+def _content_length(upload_file) -> int | None:
+    size = getattr(upload_file, "size", None)
+    return size if isinstance(size, int) and size >= 0 else None
+
+
 async def upload_audio_stream(upload_file, job_id: str, filename: str) -> str:
     """Upload a FastAPI UploadFile to S3 without blocking the event loop.
 
-    Passing the SpooledTemporaryFile directly as aiobotocore's Body serializes
-    concurrent uploads: aiohttp's request body iteration calls fileobj.read()
-    inline in the async path, so the loop stalls while bytes are pulled. Reading
-    via UploadFile.read() instead routes through anyio's thread executor, so
-    multiple concurrent uploads interleave. We then hand aiobotocore a plain
-    bytes Body, which aiohttp sends without any further blocking I/O.
+    Reads go through UploadFile.read(size), which routes to anyio's thread
+    executor, so bytes are never pulled off the SpooledTemporaryFile inline in
+    the async path.
 
-    Memory: peak buffered bytes are bounded by kafka.max_pending_jobs * payload
-    size (default 100 * audio file size). SpooledTemporaryFile spills to disk
-    above 1MB so the source was never strictly disk-only for small files; this
-    swap turns the small-file case into RAM-only and pulls large files fully
-    into RAM at upload time. Adjust kafka.max_pending_jobs if that ceiling is
-    too high for the deployment's typical file sizes.
+    Large files go out as a multipart upload. A single PutObject buffers the
+    whole body in RAM, and on a plain-HTTP endpoint SigV4 cannot skip payload
+    signing, so botocore hashes all of it inline on the event loop — a multi-GiB
+    upload stalls the process for tens of seconds, timing out health probes and
+    expiring Kafka consumer sessions. Multipart bounds both the buffer and the
+    per-hash CPU burst to one part.
+
+    Peak buffered bytes per upload are roughly the part size times
+    s3.multipart_concurrency, independent of file size.
     """
     if _client is None or _config is None:
         raise RuntimeError("S3 client not initialized")
     key = f"audio/{job_id}/{filename}"
+    part_size = _part_size_for(_content_length(upload_file))
 
-    data = await upload_file.read()
-    await _client.put_object(Bucket=_config.bucket, Key=key, Body=data)
-    logger.debug("Uploaded %s bytes to s3://%s/%s", len(data), _config.bucket, key)
+    # A short first read means the body fits in one part; also covers the empty
+    # upload, which multipart rejects.
+    head = await upload_file.read(part_size)
+    if len(head) < part_size:
+        await _client.put_object(Bucket=_config.bucket, Key=key, Body=head)
+        logger.debug("Uploaded %s bytes to s3://%s/%s", len(head), _config.bucket, key)
+        return key
+
+    total = await _upload_multipart(upload_file, key, head, part_size)
+    logger.debug(
+        "Uploaded %s bytes to s3://%s/%s (multipart, %s byte parts)",
+        total,
+        _config.bucket,
+        key,
+        part_size,
+    )
     return key
+
+
+async def _upload_multipart(upload_file, key: str, head: bytes, part_size: int) -> int:
+    """Stream upload_file to key as a multipart upload; returns bytes written.
+
+    head is the already-read first part. Aborts on failure so stored parts do
+    not linger as billable storage.
+    """
+    assert _client is not None and _config is not None
+    created = await _client.create_multipart_upload(Bucket=_config.bucket, Key=key)
+    upload_id = created["UploadId"]
+    try:
+        parts = await _send_parts(upload_file, key, upload_id, head, part_size)
+        await _client.complete_multipart_upload(
+            Bucket=_config.bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": [descriptor for _, descriptor in parts]},
+        )
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await _client.abort_multipart_upload(
+                Bucket=_config.bucket, Key=key, UploadId=upload_id
+            )
+        raise
+    return sum(size for size, _ in parts)
+
+
+async def _send_parts(
+    upload_file, key: str, upload_id: str, head: bytes, part_size: int
+) -> list[tuple[int, dict]]:
+    """Upload every part with bounded concurrency.
+
+    Returns (size, part-descriptor) pairs ordered by part number, the order
+    complete_multipart_upload requires.
+    """
+    assert _client is not None and _config is not None
+    client, bucket = _client, _config.bucket
+    semaphore = asyncio.Semaphore(max(1, _config.multipart_concurrency))
+    tasks: list[asyncio.Task[tuple[int, dict]]] = []
+
+    async def send(part_number: int, chunk: bytes) -> tuple[int, dict]:
+        try:
+            response = await client.upload_part(
+                Bucket=bucket,
+                Key=key,
+                UploadId=upload_id,
+                PartNumber=part_number,
+                Body=chunk,
+            )
+            return len(chunk), {"ETag": response["ETag"], "PartNumber": part_number}
+        finally:
+            semaphore.release()
+
+    async def dispatch(part_number: int, chunk: bytes) -> None:
+        # Acquired here, not inside send(), so back-pressure applies before the
+        # next read allocates another chunk.
+        await semaphore.acquire()
+        tasks.append(asyncio.create_task(send(part_number, chunk)))
+
+    try:
+        await dispatch(1, head)
+        part_number = 2
+        while True:
+            chunk = await upload_file.read(part_size)
+            if not chunk:
+                break
+            if part_number > _MAX_PARTS:
+                # Only reachable when the content length was unknown up front.
+                raise ValueError(
+                    f"Upload exceeds the {_MAX_PARTS}-part S3 limit at "
+                    f"{part_size} bytes per part; raise s3.multipart_part_size"
+                )
+            await dispatch(part_number, chunk)
+            part_number += 1
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB

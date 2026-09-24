@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-import whisperx_api_server.s3_client as s3_client
 import whisperx_api_server.transcriber as transcriber
+from whisperx_api_server.storage import service as storage
 
 pytestmark = pytest.mark.anyio
 
@@ -26,7 +26,7 @@ def _patch_get_result(monkeypatch, value):
     async def fake(job_id):
         return value
 
-    monkeypatch.setattr(s3_client, "get_result", fake)
+    monkeypatch.setattr(storage, "get_result", fake)
 
 
 async def test_async_in_direct_mode_400(make_app):
@@ -100,6 +100,8 @@ async def test_result_success_verbose_json(make_app, monkeypatch):
     [
         ("InvalidAudioError", 422),
         ("UploadTooLargeError", 413),
+        ("StorageKeyError", 422),
+        ("ObjectNotFound", 422),
         ("TimeoutError", 504),
         ("RuntimeError", 500),
         ("SomethingUnknown", 500),
@@ -122,6 +124,53 @@ async def test_result_error_envelope_mapped(
     async with _client(make_app(MODE="kafka")) as c:
         resp = await c.get("/v1/audio/transcriptions/job-err/result")
     assert resp.status_code == expected, resp.text
+
+
+async def test_rejected_storage_key_reports_the_reason_not_a_generic_500(
+    make_app, monkeypatch
+):
+    _patch_get_result(
+        monkeypatch,
+        json.dumps(
+            {
+                "job_id": "job-err",
+                "status": "error",
+                "error": (
+                    "Rejected storage key from job event: keys must look like "
+                    "'audio/<job_id>/<filename>', got 'results/other-job'"
+                ),
+                "error_type": "StorageKeyError",
+            }
+        ),
+    )
+    async with _client(make_app(MODE="kafka")) as c:
+        resp = await c.get("/v1/audio/transcriptions/job-err/result")
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert "audio/<job_id>/<filename>" in detail
+    assert "unexpected error" not in detail.lower()
+
+
+async def test_missing_input_object_is_not_404(make_app, monkeypatch):
+    """404 on this endpoint means "not ready, keep polling". A job that failed
+    because its input was gone is terminal, so it must not look like that."""
+    _patch_get_result(
+        monkeypatch,
+        json.dumps(
+            {
+                "job_id": "job-gone",
+                "status": "error",
+                "error": "No such object: audio/job-gone/a.wav",
+                "error_type": "ObjectNotFound",
+            }
+        ),
+    )
+    async with _client(make_app(MODE="kafka")) as c:
+        resp = await c.get("/v1/audio/transcriptions/job-gone/result")
+
+    assert resp.status_code == 422, resp.text
+    assert "audio/job-gone/a.wav" in resp.json()["detail"]
 
 
 async def test_result_corrupt_envelope_500(make_app, monkeypatch):

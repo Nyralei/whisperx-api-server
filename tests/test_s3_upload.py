@@ -1,12 +1,13 @@
-"""Unit tests for audio upload chunking (fake boto client, no MinIO)."""
+"""Unit tests for audio upload chunking (fake boto client, no real server)."""
 
 import asyncio
 import io
 
 import pytest
 
-from whisperx_api_server import s3_client
 from whisperx_api_server.config import S3Config
+from whisperx_api_server.storage import s3_store
+from whisperx_api_server.storage.s3_store import S3ObjectStore
 
 pytestmark = pytest.mark.anyio
 
@@ -79,37 +80,61 @@ class FakeBotoS3:
         self.aborted.append(UploadId)
 
 
+def _store(fake, **cfg) -> S3ObjectStore:
+    store = S3ObjectStore(S3Config(multipart_part_size=PART, **cfg))
+    store._client = fake
+    return store
+
+
 @pytest.fixture
 def fake_s3(monkeypatch):
-    fake = FakeBotoS3()
-    monkeypatch.setattr(s3_client, "_client", fake)
-    monkeypatch.setattr(s3_client, "_config", S3Config(multipart_part_size=PART))
-    monkeypatch.setattr(s3_client, "_MIN_PART_SIZE", PART)
-    return fake
+    # The real 5 MiB floor would make every fixture-sized body a single PUT.
+    monkeypatch.setattr(s3_store, "_MIN_PART_SIZE", PART)
+    return FakeBotoS3()
+
+
+async def _upload(store, data, *, expose_size=True, job="job1", name="a.wav"):
+    from whisperx_api_server.storage import service
+
+    upload_file = FakeUploadFile(data, expose_size=expose_size)
+    key = f"audio/{job}/{name}"
+    return key, await store.put_stream(
+        key=key,
+        chunks=service._read_upload_chunks(upload_file),
+        content_length=service._content_length(upload_file),
+    )
 
 
 async def test_small_upload_uses_single_put(fake_s3):
+    store = _store(fake_s3)
     data = b"x" * (PART - 1)
-    key = await s3_client.upload_audio_stream(FakeUploadFile(data), "job1", "a.wav")
 
-    assert key == "audio/job1/a.wav"
+    key, written = await _upload(store, data)
+
+    assert written == len(data)
     assert fake_s3.objects[key] == data
     assert fake_s3.put_object_calls == 1
     assert not fake_s3.uploads and not fake_s3.completed
 
 
 async def test_empty_upload_uses_single_put(fake_s3):
-    key = await s3_client.upload_audio_stream(FakeUploadFile(b""), "job1", "a.wav")
+    store = _store(fake_s3)
 
+    key, written = await _upload(store, b"")
+
+    assert written == 0
     assert fake_s3.objects[key] == b""
     assert fake_s3.put_object_calls == 1
     assert not fake_s3.completed
 
 
 async def test_large_upload_reassembles_exactly(fake_s3):
+    store = _store(fake_s3)
     data = bytes(range(256)) * 20  # 5120 bytes = 5 parts
-    key = await s3_client.upload_audio_stream(FakeUploadFile(data), "job1", "a.wav")
 
+    key, written = await _upload(store, data)
+
+    assert written == len(data)
     assert fake_s3.objects[key] == data
     assert fake_s3.put_object_calls == 0
     assert len(fake_s3.completed) == 1
@@ -117,41 +142,61 @@ async def test_large_upload_reassembles_exactly(fake_s3):
 
 
 async def test_trailing_partial_part_preserved(fake_s3):
+    store = _store(fake_s3)
     data = b"y" * (PART * 2 + 7)
-    key = await s3_client.upload_audio_stream(FakeUploadFile(data), "job1", "a.wav")
 
+    key, written = await _upload(store, data)
+
+    assert written == len(data)
     assert fake_s3.objects[key] == data
     assert sorted(fake_s3.part_sizes) == [7, PART, PART]
 
 
 async def test_upload_without_known_size_still_chunks(fake_s3):
+    store = _store(fake_s3)
     data = b"z" * (PART * 3)
-    upload = FakeUploadFile(data, expose_size=False)
-    key = await s3_client.upload_audio_stream(upload, "job1", "a.wav")
+
+    key, _ = await _upload(store, data, expose_size=False)
 
     assert fake_s3.objects[key] == data
     assert len(fake_s3.part_sizes) == 3
 
 
-async def test_concurrency_bounds_parts_in_flight(fake_s3, monkeypatch):
-    monkeypatch.setattr(
-        s3_client,
-        "_config",
-        S3Config(multipart_part_size=PART, multipart_concurrency=2),
+async def test_parts_are_regrouped_across_reader_chunk_boundaries(fake_s3):
+    """The reader's chunk size is independent of the S3 part size."""
+    store = _store(fake_s3)
+    data = bytes(range(256)) * 12  # 3072 bytes = 3 parts
+
+    async def dribble():
+        for i in range(0, len(data), 7):  # chunks that divide no part boundary
+            yield data[i : i + 7]
+
+    key = "audio/job1/a.wav"
+    written = await store.put_stream(
+        key=key, chunks=dribble(), content_length=len(data)
     )
+
+    assert written == len(data)
+    assert fake_s3.objects[key] == data
+    assert fake_s3.part_sizes == [PART] * 3
+
+
+async def test_concurrency_bounds_parts_in_flight(fake_s3):
+    store = _store(fake_s3, multipart_concurrency=2)
     data = b"w" * (PART * 8)
 
-    await s3_client.upload_audio_stream(FakeUploadFile(data), "job1", "a.wav")
+    await _upload(store, data)
 
     assert fake_s3.max_in_flight <= 2
 
 
 async def test_failed_part_aborts_upload(fake_s3):
+    store = _store(fake_s3)
     fake_s3.fail_on_part = 3
     data = b"q" * (PART * 5)
 
     with pytest.raises(RuntimeError, match="part 3 failed"):
-        await s3_client.upload_audio_stream(FakeUploadFile(data), "job1", "a.wav")
+        await _upload(store, data)
 
     assert len(fake_s3.aborted) == 1
     assert not fake_s3.completed
@@ -159,22 +204,22 @@ async def test_failed_part_aborts_upload(fake_s3):
     assert not fake_s3.uploads, "no multipart upload may be left dangling"
 
 
-def test_part_size_respects_s3_minimum(monkeypatch):
-    monkeypatch.setattr(s3_client, "_config", S3Config(multipart_part_size=1024))
+def test_part_size_respects_s3_minimum():
+    store = S3ObjectStore(S3Config(multipart_part_size=1024))
 
-    assert s3_client._part_size_for(None) == s3_client._MIN_PART_SIZE
+    assert store._part_size_for(None) == s3_store._MIN_PART_SIZE
 
 
-def test_part_size_scales_past_part_limit(monkeypatch):
-    monkeypatch.setattr(s3_client, "_config", S3Config())
+def test_part_size_scales_past_part_limit():
+    store = S3ObjectStore(S3Config())
     configured = S3Config().multipart_part_size
 
-    # A file that fits inside 10000 configured-size parts keeps that size.
-    assert s3_client._part_size_for(configured * s3_client._MAX_PARTS) == configured
+    # A body that fits inside 10000 configured-size parts keeps that size.
+    assert store._part_size_for(configured * s3_store._MAX_PARTS) == configured
 
     # Beyond that the part size grows so the count stays within the limit.
     huge = 5 * 1024**4  # 5 TiB, S3's largest object
-    grown = s3_client._part_size_for(huge)
+    grown = store._part_size_for(huge)
     assert grown > configured
-    assert -(-huge // grown) <= s3_client._MAX_PARTS
+    assert -(-huge // grown) <= s3_store._MAX_PARTS
     assert grown % (1024 * 1024) == 0

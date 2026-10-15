@@ -3,7 +3,8 @@ import json
 import logging
 import re
 import time
-from typing import Annotated, Literal
+from collections.abc import Coroutine
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -27,6 +28,7 @@ from whisperx_api_server.config import (
     ResponseFormat,
 )
 from whisperx_api_server.dependencies import get_config
+from whisperx_api_server.executors import await_to_completion
 from whisperx_api_server.formatters import format_transcription
 from whisperx_api_server.storage import service as storage
 from whisperx_api_server.storage.contracts import ObjectNotFound, StorageKeyError
@@ -132,6 +134,40 @@ def _requested_model(model: str | None) -> str | None:
     if model is None or model == _OPENAI_PLACEHOLDER_MODEL:
         return None
     return model
+
+
+_CLIENT_CLOSED_REQUEST = 499
+
+
+class _ClientDisconnected(Exception):
+    pass
+
+
+async def _wait_for_disconnect(request: Request) -> None:
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def _run_direct_job(
+    request: Request,
+    config: Config,
+    job: Coroutine[Any, Any, dict],
+    cancellable: bool,
+) -> dict:
+    if not (config.cancel_on_disconnect and cancellable):
+        return await job
+    task = asyncio.ensure_future(job)
+    watcher = asyncio.ensure_future(_wait_for_disconnect(request))
+    try:
+        await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        watcher.cancel()
+        if not task.done():
+            task.cancel()
+            await await_to_completion(asyncio.gather(task, return_exceptions=True))
+    if task.cancelled():
+        raise _ClientDisconnected
+    return task.result()
 
 
 def get_timestamp_granularities(
@@ -378,23 +414,31 @@ async def transcribe_audio(
                 callback_url=callback_url,
             )
         else:
-            transcription = await transcriber.transcribe(
-                audio_file=None if use_url else file,
-                source_url=audio_url if use_url else None,
-                batch_size=batch_size,
-                asr_options=asr_options,
-                language=language,
-                model_name=model_name,
-                align=align,
-                diarize=diarize,
-                speaker_embeddings=speaker_embeddings,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                chunk_size=chunk_size,
-                request_id=request_id,
+            transcription = await _run_direct_job(
+                request,
+                config,
+                transcriber.transcribe(
+                    audio_file=None if use_url else file,
+                    source_url=audio_url if use_url else None,
+                    batch_size=batch_size,
+                    asr_options=asr_options,
+                    language=language,
+                    model_name=model_name,
+                    align=align,
+                    diarize=diarize,
+                    speaker_embeddings=speaker_embeddings,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    chunk_size=chunk_size,
+                    request_id=request_id,
+                ),
+                cancellable=callback_url is None,
             )
+    except _ClientDisconnected:
+        logger.info("Request ID: %s - Client disconnected; job cancelled", request_id)
+        return Response(status_code=_CLIENT_CLOSED_REQUEST)
     except asyncio.CancelledError:
-        logger.info("Request ID: %s - Client disconnected; cancelling", request_id)
+        logger.info("Request ID: %s - Request cancelled", request_id)
         raise
     except Exception as e:
         _raise_for_transcription_error(request_id, e, "transcription")
@@ -525,18 +569,26 @@ async def translate_audio(
                 request_id=request_id,
             )
         else:
-            translation = await transcriber.transcribe(
-                audio_file=None if use_url else file,
-                source_url=audio_url if use_url else None,
-                batch_size=batch_size,
-                asr_options=asr_options,
-                model_name=model_name,
-                chunk_size=chunk_size,
-                request_id=request_id,
-                task="translate",
+            translation = await _run_direct_job(
+                request,
+                config,
+                transcriber.transcribe(
+                    audio_file=None if use_url else file,
+                    source_url=audio_url if use_url else None,
+                    batch_size=batch_size,
+                    asr_options=asr_options,
+                    model_name=model_name,
+                    chunk_size=chunk_size,
+                    request_id=request_id,
+                    task="translate",
+                ),
+                cancellable=True,
             )
+    except _ClientDisconnected:
+        logger.info("Request ID: %s - Client disconnected; job cancelled", request_id)
+        return Response(status_code=_CLIENT_CLOSED_REQUEST)
     except asyncio.CancelledError:
-        logger.info("Request ID: %s - Client disconnected; cancelling", request_id)
+        logger.info("Request ID: %s - Request cancelled", request_id)
         raise
     except Exception as e:
         _raise_for_transcription_error(request_id, e, "translation")

@@ -475,6 +475,9 @@ class Config(BaseSettings):
     # decode can overlap with the in-flight inference.
     max_concurrent_transcriptions: int = Field(default=1, ge=0)
 
+    # Direct mode: cancel a sync request's job when its client disconnects.
+    cancel_on_disconnect: bool = False
+
     # Port for the worker's HTTP health server (exposes /healthcheck and /ready).
     # Used by Kubernetes startup/liveness/readiness probes for ordered StatefulSet rollout.
     worker_health_port: int = Field(default=9090, ge=1, le=65535)

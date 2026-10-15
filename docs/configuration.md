@@ -15,6 +15,7 @@ All available settings are defined in [`config.py`](../src/whisperx_api_server/c
 | `AUTH_REQUIRED` | `false` | When `true`, refuse to start unless `API_KEY` or `API_KEYS_FILE` is set |
 | `MODE` | `direct` | `direct` or `kafka` |
 | `MAX_CONCURRENT_TRANSCRIPTIONS` | `1` | Max concurrent ML inferences (transcribe / align / diarize). `0` = unlimited. See the concurrency note below. |
+| `CANCEL_ON_DISCONNECT` | `false` | Direct mode: when a synchronous request's client disconnects, drop the job if still queued, or stop it at the next batch if running. The request's status becomes `failed` with `error_type: "Cancelled"`. Requests with a `callback_url` always finish. Leave it off if clients disconnect on purpose and fetch `/result` later, or if a proxy in front closes idle connections sooner than your longest job (e.g. nginx `proxy_read_timeout`, 60 s by default). |
 | `WEBUI__ENABLED` | `false` | Serve the bundled [web UI](web-ui.md) at `/webui` |
 
 > **`MAX_CONCURRENT_TRANSCRIPTIONS` parallelizes across *distinct* models, not within one.** Each transcription pipeline holds a per-model lock during the transcribe step, so two requests for the **same** model still run one at a time even with the limit raised — the setting lets a request for a *different* model (and the align / diarize stages) proceed concurrently. To raise same-model throughput, add GPUs or run more replicas / workers. Whichever process runs inference (the API in direct mode, the worker in Kafka mode) logs this caveat at startup when the limit is >1.

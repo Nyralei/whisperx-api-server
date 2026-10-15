@@ -14,7 +14,7 @@ from whisperx import transcribe as whisperx_transcribe
 from whisperx.asr import FasterWhisperPipeline
 
 from whisperx_api_server.dependencies import get_config
-from whisperx_api_server.executors import get_io_executor
+from whisperx_api_server.executors import await_to_completion, get_io_executor
 
 logger = logging.getLogger(__name__)
 
@@ -149,17 +149,20 @@ async def _get_or_init_model(
         logger.info(log_reuse.format(key=key))
         return cache_dict[key]
 
-    async with lock_dict[key]:
-        if key in cache_dict:
-            return cache_dict[key]
-        try:
-            logger.info(log_init.format(key=key))
-            instance = await init_func()
-        except Exception as e:
-            logger.error("Failed to initialize model %s: %s", key, e)
-            raise
-        cache_dict[key] = instance
-        return instance
+    async def _init_once() -> Any:
+        async with lock_dict[key]:
+            if key in cache_dict:
+                return cache_dict[key]
+            try:
+                logger.info(log_init.format(key=key))
+                instance = await init_func()
+            except Exception as e:
+                logger.error("Failed to initialize model %s: %s", key, e)
+                raise
+            cache_dict[key] = instance
+            return instance
+
+    return await await_to_completion(asyncio.ensure_future(_init_once()))
 
 
 async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
@@ -203,7 +206,9 @@ async def load_transcribe_pipeline(model_name: str) -> FasterWhisperPipeline:
     loop = asyncio.get_running_loop()
     if not config.whisper.cache:
         logger.info("Initializing transcribe pipeline without cache: %s", cache_key)
-        pipeline = await loop.run_in_executor(get_io_executor(), _create_pipeline)
+        pipeline = await await_to_completion(
+            loop.run_in_executor(get_io_executor(), _create_pipeline)
+        )
         pipeline._transcribe_lock = asyncio.Lock()
         pipeline._cache_key = None  # uncached: unload-time refcount doesn't apply
         return pipeline
@@ -282,15 +287,17 @@ async def load_align_model(
 
     async def _init_alignment() -> tuple[Any, dict[str, Any]]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            get_io_executor(),
-            lambda: whisperx_alignment.load_align_model(
-                language_code=language_code,
-                device=inference_device,
-                model_name=selected_model_name,
-                model_dir=model_dir,
-                model_cache_only=config.alignment.local_files_only,
-            ),
+        return await await_to_completion(
+            loop.run_in_executor(
+                get_io_executor(),
+                lambda: whisperx_alignment.load_align_model(
+                    language_code=language_code,
+                    device=inference_device,
+                    model_name=selected_model_name,
+                    model_dir=model_dir,
+                    model_cache_only=config.alignment.local_files_only,
+                ),
+            )
         )
 
     if not config.alignment.cache:
@@ -329,7 +336,9 @@ async def load_diarize_pipeline(
     loop = asyncio.get_running_loop()
     if not config.diarization.cache:
         logger.info("Initializing diarization model without cache: %s", model_name)
-        return await loop.run_in_executor(get_io_executor(), _init_diarization)
+        return await await_to_completion(
+            loop.run_in_executor(get_io_executor(), _init_diarization)
+        )
 
     diarize_model = await _get_or_init_model(
         key=model_name,

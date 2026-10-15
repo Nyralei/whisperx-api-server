@@ -14,7 +14,7 @@ from whisperx import diarize as whisperx_diarize
 
 from whisperx_api_server.config import Language
 from whisperx_api_server.dependencies import get_config
-from whisperx_api_server.executors import get_io_executor, get_model_executor
+from whisperx_api_server.executors import get_io_executor, run_stoppable
 from whisperx_api_server.observability import pipeline as _pipe
 
 from .registry import (
@@ -135,7 +135,6 @@ class WhisperXTranscriptionBackend:
         asr_options: dict[str, Any] | None,
         request_id: str,
     ) -> dict[str, Any]:
-        loop = asyncio.get_running_loop()
         lang = getattr(language, "value", language) if language else None
         num_workers = (
             0
@@ -155,16 +154,23 @@ class WhisperXTranscriptionBackend:
         lock = getattr(model, "_transcribe_lock", None)
         cache_key = getattr(model, "_cache_key", None)
 
-        def _run_transcription() -> dict[str, Any]:
-            with torch.inference_mode():
-                return model.transcribe(
-                    audio=audio,
-                    batch_size=batch_size,
-                    chunk_size=chunk_size,
-                    num_workers=num_workers,
-                    language=lang,
-                    task=task,
-                )
+        def _run_transcription(checkpoint) -> dict[str, Any]:
+            tokenizer, options = model.tokenizer, model.options
+            try:
+                with torch.inference_mode():
+                    return model.transcribe(
+                        audio=audio,
+                        batch_size=batch_size,
+                        chunk_size=chunk_size,
+                        num_workers=num_workers,
+                        language=lang,
+                        task=task,
+                        progress_callback=checkpoint,
+                    )
+            except BaseException:
+                # whisperx only resets these after a run that completes
+                model.tokenizer, model.options = tokenizer, options
+                raise
 
         # Refcount so concurrent /models/unload can see this pipeline is in use.
         if cache_key is not None:
@@ -173,14 +179,10 @@ class WhisperXTranscriptionBackend:
             if lock is not None:
                 async with lock:
                     _apply_request_options(model, asr_options)
-                    result = await loop.run_in_executor(
-                        get_model_executor(), _run_transcription
-                    )
+                    result = await run_stoppable(_run_transcription)
             else:
                 _apply_request_options(model, asr_options)
-                result = await loop.run_in_executor(
-                    get_model_executor(), _run_transcription
-                )
+                result = await run_stoppable(_run_transcription)
         finally:
             if cache_key is not None:
                 release_transcribe_pipeline(cache_key)
@@ -245,7 +247,6 @@ class WhisperXAlignmentBackend:
                 "Alignment backend requires 'language' in transcription result."
             )
 
-        loop = asyncio.get_running_loop()
         device = determine_inference_device()
         cache_key = align_cache_key_for(language_code)
 
@@ -265,7 +266,7 @@ class WhisperXAlignmentBackend:
                 time.perf_counter() - alignment_model_start,
             )
 
-            def _run_alignment() -> Any:
+            def _run_alignment(checkpoint) -> Any:
                 with torch.inference_mode():
                     return whisperx_alignment.align(
                         transcript=result["segments"],
@@ -274,13 +275,12 @@ class WhisperXAlignmentBackend:
                         audio=audio,
                         device=device,
                         return_char_alignments=False,
+                        progress_callback=checkpoint,
                     )
 
             alignment_start = time.perf_counter()
             async with alignment_locks[cache_key]:
-                result["segments"] = await loop.run_in_executor(
-                    get_model_executor(), _run_alignment
-                )
+                result["segments"] = await run_stoppable(_run_alignment)
         finally:
             release_align_model(language_code)
 
@@ -383,22 +383,25 @@ class WhisperXDiarizationBackend:
         if max_speakers is not None:
             speaker_bounds["max_speakers"] = max_speakers
 
-        def _run_diarization() -> tuple[Any, Any]:
+        def _run_diarization(checkpoint) -> tuple[Any, Any]:
             with torch.inference_mode():
                 if speaker_embeddings:
                     return diarize_model(
-                        audio=audio, return_embeddings=True, **speaker_bounds
+                        audio=audio,
+                        return_embeddings=True,
+                        progress_callback=checkpoint,
+                        **speaker_bounds,
                     )
-                return diarize_model(audio=audio, **speaker_bounds), None
+                return diarize_model(
+                    audio=audio, progress_callback=checkpoint, **speaker_bounds
+                ), None
 
         # Refcount so concurrent /diarize_models/unload sees this is in use.
         acquire_diarize_pipeline(config.diarization.model)
         diarize_start = time.perf_counter()
         try:
             async with diarize_locks[config.diarization.model]:
-                diarize_segments, embeddings = await loop.run_in_executor(
-                    get_model_executor(), _run_diarization
-                )
+                diarize_segments, embeddings = await run_stoppable(_run_diarization)
         finally:
             release_diarize_pipeline(config.diarization.model)
         _pipe.stage_duration.labels(stage="diarize_infer").observe(

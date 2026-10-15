@@ -12,6 +12,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from fastapi import UploadFile
 
 if TYPE_CHECKING:
@@ -193,6 +194,11 @@ async def load_audio_from_path(
     return audio
 
 
+async def _join_writer(writer_thread: threading.Thread) -> None:
+    with anyio.CancelScope(shield=True):
+        await asyncio.to_thread(writer_thread.join, _UPLOAD_WRITER_JOIN_TIMEOUT_SECS)
+
+
 async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
     """Stream upload to temp file in chunks. Enforces max_upload_size_bytes if set."""
     max_bytes = get_config().max_upload_size_bytes
@@ -213,13 +219,15 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
                     f.write(chunk)
         except BaseException as e:
             write_error.append(e)
+            while chunk_queue.get() is not None:
+                pass
 
     writer_thread = threading.Thread(target=_writer, daemon=True)
     writer_thread.start()
 
     total_bytes = 0
     try:
-        while True:
+        while not write_error:
             chunk = await audio_file.read(_UPLOAD_STREAM_CHUNK_SIZE)
             if len(chunk) == 0:
                 break
@@ -236,22 +244,23 @@ async def _save_upload_to_temp(audio_file: UploadFile, request_id: str) -> str:
             chunk_queue.put_nowait(None)
         except queue.Full:
             await asyncio.to_thread(chunk_queue.put, None)
-    except Exception as e:
-        if not isinstance(e, UploadTooLargeError):
+        await _join_writer(writer_thread)
+    except BaseException as e:
+        if not isinstance(e, (UploadTooLargeError, asyncio.CancelledError)):
             logger.error(
                 "Request ID: %s - Failed to read uploaded file: %s", request_id, e
             )
-        with contextlib.suppress(queue.Full):
-            chunk_queue.put_nowait(None)
-        await asyncio.to_thread(writer_thread.join, _UPLOAD_WRITER_JOIN_TIMEOUT_SECS)
+        with contextlib.suppress(queue.Empty):
+            while True:
+                chunk_queue.get_nowait()
+        chunk_queue.put_nowait(None)
+        await _join_writer(writer_thread)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except OSError:
                 pass
         raise
-    finally:
-        await asyncio.to_thread(writer_thread.join, _UPLOAD_WRITER_JOIN_TIMEOUT_SECS)
 
     if write_error:
         if os.path.exists(file_path):
@@ -513,6 +522,12 @@ async def transcribe(
         finally:
             if concurrency_sem:
                 concurrency_sem.release()
+    except asyncio.CancelledError:
+        logger.info(
+            "Request ID: %s - Transcription cancelled for %s", request_id, source_label
+        )
+        request_status.mark_failed(request_id, "Request cancelled", "Cancelled")
+        raise
     except Exception as e:
         logger.error(
             "Request ID: %s - Transcription failed for %s with error: %s",

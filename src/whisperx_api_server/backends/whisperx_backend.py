@@ -247,6 +247,22 @@ class WhisperXAlignmentBackend:
                 "Alignment backend requires 'language' in transcription result."
             )
 
+        configured_models = get_config().alignment.models
+        if (
+            "multilingual" not in configured_models
+            and language_code not in configured_models
+            and language_code not in whisperx_alignment.DEFAULT_ALIGN_MODELS_TORCH
+            and language_code not in whisperx_alignment.DEFAULT_ALIGN_MODELS_HF
+        ):
+            logger.warning(
+                "Request ID: %s - Skipping word alignment for language=%s: "
+                "no default or configured alignment model; preserving unaligned "
+                "segments. Configure ALIGNMENT__MODELS to enable word alignment.",
+                request_id,
+                language_code,
+            )
+            return result
+
         device = determine_inference_device()
         cache_key = align_cache_key_for(language_code)
 

@@ -148,6 +148,7 @@ async def run_worker() -> None:
     from aiokafka import ConsumerRebalanceListener
 
     paused_for_job = [False]
+    paused_partitions = [set()]
 
     class _PauseAwareRebalanceListener(ConsumerRebalanceListener):
         """Restores `consumer.pause()` state across partition reassignments.
@@ -170,6 +171,14 @@ async def run_worker() -> None:
                     "Rebalance: re-applied pause on %d partition(s) for in-flight job",
                     len(assigned),
                 )
+            elif paused_partitions[0]:
+                scoped = set(assigned) & paused_partitions[0]
+                if scoped:
+                    consumer.pause(*scoped)
+                    logger.info(
+                        "Rebalance: re-applied pause on %d capped handoff partition(s)",
+                        len(scoped),
+                    )
 
     await consumer.start()
     await producer.start()
@@ -198,7 +207,13 @@ async def run_worker() -> None:
     )
 
     try:
-        await consume_loop(consumer, ctx, shutdown_event, paused_for_job)
+        await consume_loop(
+            consumer,
+            ctx,
+            shutdown_event,
+            paused_for_job,
+            paused_partitions,
+        )
     finally:
         if sigterm_registered:
             with contextlib.suppress(NotImplementedError, RuntimeError):

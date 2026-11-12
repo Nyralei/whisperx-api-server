@@ -27,6 +27,11 @@ def test_nested_kafka_field(monkeypatch):
     assert cfg.kafka.max_delivery_attempts == 5
 
 
+def test_nested_handoff_limit(monkeypatch):
+    cfg = _load(monkeypatch, KAFKA__HANDOFF_MAX_HOPS="7")
+    assert cfg.kafka.handoff_max_hops == 7
+
+
 def test_metrics_flat_alias_enables(monkeypatch):
     cfg = _load(monkeypatch, METRICS_ENABLED="true")
     assert cfg.metrics.enabled is True

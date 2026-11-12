@@ -30,6 +30,7 @@ All available settings are defined in [`config.py`](../src/whisperx_api_server/c
 | `KAFKA__PROGRESS_TOPIC` | `transcription-progress` | Best-effort topic for per-stage worker progress events consumed by the status endpoint |
 | `KAFKA__JOB_LEASE_TTL_SECONDS` | `300` | Processing-lease TTL; bounds crash-recovery takeover latency |
 | `KAFKA__MAX_DELIVERY_ATTEMPTS` | `3` | Attempts before a job is routed to `transcription-dlq` |
+| `KAFKA__HANDOFF_MAX_HOPS` | `20` | Maximum relay copies for a queued job before it is rewound without republishing |
 | `STORAGE__BACKEND` | `s3` | Object storage backend: `s3` or `fs`. See [Storage Backends](storage.md) |
 | `STORAGE__DELETE_AFTER_DOWNLOAD` | `true` | Delete the stored input once the job has a result. Never applies to `file_path` inputs |
 | `MINIO_ROOT_USER` | `minioadmin` | S3 server root user — **change before deploying** |

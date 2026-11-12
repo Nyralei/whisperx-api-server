@@ -656,6 +656,91 @@ async def test_queued_job_relayed_to_foreign_partition(harness, monkeypatch):
     assert paused_for_job == [False]
 
 
+async def test_handoff_hop_limit_rewinds_without_republish(harness, monkeypatch):
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer(
+        [
+            {tp: [_job_msg("A", offset=10)]},
+            {tp: [_job_msg("B", offset=11, handoff_hops=20)]},
+        ],
+        topic=topic,
+        partitions={0, 1, 2},
+        owned={0},
+    )
+
+    handled, paused_for_job = await _run_loop_with_slow_job(
+        harness, monkeypatch, consumer
+    )
+
+    assert handled == ["A"]
+    assert [s for s in harness.producer.sends if s.topic == topic] == []
+    assert consumer.seeks == [(tp, 11)]
+    assert consumer.pause_calls == 1
+    assert paused_for_job == [False]
+
+
+def test_handoff_delay_exponentially_backoffs_and_caps(monkeypatch):
+    monkeypatch.setattr(handler, "_HANDOFF_THROTTLE_SECONDS", 1.0)
+    monkeypatch.setattr(handler, "_HANDOFF_MAX_THROTTLE_SECONDS", 30.0)
+
+    assert [handler._handoff_delay_seconds(hops) for hops in range(1, 8)] == [
+        1.0,
+        2.0,
+        4.0,
+        8.0,
+        16.0,
+        30.0,
+        30.0,
+    ]
+
+
+@pytest.mark.parametrize("handoff_hops", ["invalid", None, float("inf")])
+async def test_malformed_handoff_hops_are_capped_and_scoped(harness, handoff_hops):
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer([], topic=topic, partitions={0, 1, 2}, owned={0})
+    msg = _job_msg("B", offset=11, handoff_hops=handoff_hops)
+    paused_for_job = [False]
+    paused_partitions = [set()]
+
+    await handler._relay_queued_message(
+        msg,
+        tp,
+        consumer,
+        harness.ctx,
+        "A",
+        paused_for_job,
+        paused_partitions,
+    )
+
+    assert [s for s in harness.producer.sends if s.topic == topic] == []
+    assert consumer.seeks == [(tp, 11)]
+    assert paused_for_job == [False]
+    assert paused_partitions == [{tp}]
+
+
+async def test_negative_handoff_hops_are_normalized(harness, monkeypatch):
+    topic = harness.ctx.config.kafka.request_topic
+    tp = _TP(topic, 0)
+    consumer = FakeConsumer(
+        [
+            {tp: [_job_msg("A", offset=10)]},
+            {tp: [_job_msg("B", offset=11, handoff_hops=-3)]},
+        ],
+        topic=topic,
+        partitions={0, 1, 2},
+        owned={0},
+    )
+
+    handled, _ = await _run_loop_with_slow_job(harness, monkeypatch, consumer)
+
+    assert handled == ["A"]
+    relayed = [s for s in harness.producer.sends if s.topic == topic]
+    assert len(relayed) == 1
+    assert json.loads(relayed[0].value)["handoff_hops"] == 1
+
+
 async def test_duplicate_of_inflight_job_dropped_not_relayed(harness, monkeypatch):
     """A redelivery of the job currently being processed must not be relayed —
     that would start a concurrent duplicate run on an idle worker."""

@@ -272,6 +272,7 @@ class KafkaConfig(BaseModel):
     # after it expires (crash recovery latency is bounded by this value).
     job_lease_ttl_seconds: float = Field(default=300.0, gt=0)
     dead_letter_topic: str = Field(default="transcription-dlq")
+    handoff_max_hops: int = Field(default=20, gt=0)
 
 
 class S3Config(BaseModel):

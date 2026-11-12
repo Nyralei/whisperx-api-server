@@ -306,6 +306,7 @@ async def commit_safely(commit: Callable[[], Awaitable[None]]) -> None:
 
 
 _HANDOFF_THROTTLE_SECONDS = 1.0
+_HANDOFF_MAX_THROTTLE_SECONDS = 30.0
 
 
 def _foreign_partitions(consumer: Any, topic: str) -> set[int]:
@@ -322,7 +323,8 @@ async def _relay_queued_message(
     ctx: WorkerContext,
     current_job_id: str,
     paused_for_job: list[bool],
-) -> None:
+    paused_partitions: list[set[Any]] | None = None,
+) -> int | None:
     """Republish a message fetched mid-job so an idle worker picks it up instead
     of it waiting behind this worker's in-flight job.
 
@@ -332,7 +334,7 @@ async def _relay_queued_message(
     claims/results idempotency layer deduplicates against the relayed copy.
     """
     if msg.value is None:
-        return
+        return None
     try:
         event = json.loads(msg.value)
     except Exception:
@@ -344,14 +346,32 @@ async def _relay_queued_message(
             msg.partition,
             preview,
         )
-        return
+        return None
     job_id = event.get("job_id", "<unknown>")
     if job_id == current_job_id:
         # Relaying would start a concurrent duplicate on an idle worker; the
         # in-flight run stores the result this delivery would need anyway.
         logger.info("Job %s: duplicate delivery during own run, dropped", job_id)
-        return
-    event["handoff_hops"] = hops = int(event.get("handoff_hops", 0)) + 1
+        return None
+    hop_limit = ctx.config.kafka.handoff_max_hops
+    try:
+        previous_hops = max(0, int(event.get("handoff_hops", 0)))
+    except (TypeError, ValueError, OverflowError):
+        previous_hops = hop_limit
+    if previous_hops >= hop_limit:
+        logger.warning(
+            "Job %s: handoff hop limit reached (%d); rewinding without republish",
+            job_id,
+            hop_limit,
+        )
+        with contextlib.suppress(Exception):
+            consumer.seek(tp, msg.offset)
+        with contextlib.suppress(Exception):
+            consumer.pause(tp)
+        if paused_partitions is not None:
+            paused_partitions[0].add(tp)
+        return None
+    event["handoff_hops"] = hops = previous_hops + 1
     request_topic = ctx.config.kafka.request_topic
     foreign = _foreign_partitions(consumer, request_topic)
     if not foreign:
@@ -377,13 +397,21 @@ async def _relay_queued_message(
         # refetches the message anyway.
         with contextlib.suppress(Exception):
             consumer.seek(tp, msg.offset)
-        return
+        return hops
     _kafka.handoff_total.inc()
     logger.info(
         "Job %s: handed off to partition %s while busy (hop %d)",
         job_id,
         target,
         hops,
+    )
+    return hops
+
+
+def _handoff_delay_seconds(hops: int) -> float:
+    return min(
+        _HANDOFF_THROTTLE_SECONDS * (2 ** max(hops - 1, 0)),
+        _HANDOFF_MAX_THROTTLE_SECONDS,
     )
 
 
@@ -392,6 +420,7 @@ async def consume_loop(
     ctx: WorkerContext,
     shutdown_event: asyncio.Event,
     paused_for_job: list[bool],
+    paused_partitions: list[set[Any]] | None = None,
 ) -> None:
     """Drain the request topic one job at a time until shutdown is requested.
 
@@ -405,6 +434,8 @@ async def consume_loop(
     The shutdown flag is only checked between jobs, so a SIGTERM mid-job lets the
     in-flight job finish (reply + commit) before the loop exits.
     """
+    if paused_partitions is None:
+        paused_partitions = [set()]
     while not shutdown_event.is_set():
         records = await consumer.getmany(timeout_ms=1000, max_records=1)
         if not records:
@@ -446,13 +477,21 @@ async def consume_loop(
                     queued = await consumer.getmany(timeout_ms=1000, max_records=1)
                     for q_tp, q_msgs in queued.items():
                         for q_msg in q_msgs:
-                            await _relay_queued_message(
-                                q_msg, q_tp, consumer, ctx, job_id, paused_for_job
+                            hops = await _relay_queued_message(
+                                q_msg,
+                                q_tp,
+                                consumer,
+                                ctx,
+                                job_id,
+                                paused_for_job,
+                                paused_partitions,
                             )
-                            await asyncio.sleep(_HANDOFF_THROTTLE_SECONDS)
+                            if hops is not None:
+                                await asyncio.sleep(_handoff_delay_seconds(hops))
                 await task
             finally:
                 paused_for_job[0] = False
+                paused_partitions[0].clear()
                 consumer.resume(*consumer.assignment())
                 logger.info("Job %s: done, consumer resumed", job_id)
 
